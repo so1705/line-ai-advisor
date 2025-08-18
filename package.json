@@ -1,0 +1,13 @@
+{
+  "name": "line-ai-advisor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "node-fetch": "^3.3.2"
+  }
+}
