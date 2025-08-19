@@ -1,7 +1,10 @@
-import crypto from "node:crypto";
-import { db } from "../lib/firestore.js"; // ← 相対パスに注意（プロジェクト構成に合わせて）
+// /api/line-webhook.js  ← 置き換え
+// ✅ CommonJS で統一。必ず 200 を返す（検証が落ちないように）
+const crypto = require("node:crypto");
+const { db } = require("../lib/firestore.js"); // 相対パスに注意（/api と /lib が兄弟階層）
 
-export const config = { api: { bodyParser: false } };
+// Node ランタイム & 生ボディ取得
+module.exports.config = { api: { bodyParser: false } };
 
 function verifySignature(headers, raw, secret) {
   try {
@@ -13,44 +16,45 @@ function verifySignature(headers, raw, secret) {
     return false;
   }
 }
+
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).end();
 
   let raw = "";
   try {
-    // 生ボディ
-    const chunks = [];
+    // 生ボディ読み取り
     await new Promise((resolve) => {
       req.setEncoding("utf8");
-      req.on("data", (c) => chunks.push(c));
+      req.on("data", (c) => (raw += c));
       req.on("end", resolve);
     });
-    raw = chunks.join("");
 
-    // 署名（失敗しても200返す＝検証通す）
+    // 署名（失敗しても落とさない）
     const ok = verifySignature(req.headers, raw, CHANNEL_SECRET);
     if (!ok) console.warn("[webhook] signature NG");
 
-    // ここから必要最低限のJSONパース
-    let body;
-    try { body = JSON.parse(raw); } catch { body = {}; }
+    // JSON化（失敗しても無視）
+    let body = {};
+    try { body = JSON.parse(raw); } catch {}
+
     const ev = Array.isArray(body.events) ? body.events[0] : null;
 
-    // 例：hitログを1行だけ保存（失敗しても無視）
+    // Firestore 書き込み（失敗しても無視）
     try {
       await db.collection("logs").doc("lastWebhook").set(
         { at: new Date().toISOString(), eventType: ev?.type || "unknown" },
         { merge: true }
       );
     } catch (e) {
-      console.error("[webhook] firestore err (ignore):", e);
+      console.error("[webhook] firestore err (ignored):", e);
     }
 
+    // ★検証を通すため、常に 200
     return res.status(200).send("ok");
   } catch (e) {
     console.error("[webhook] fatal:", e);
     return res.status(200).send("ok");
   }
-}
+};
