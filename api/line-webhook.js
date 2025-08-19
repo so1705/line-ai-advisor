@@ -1,6 +1,6 @@
 // /api/line-webhook.js（ACK+委譲はそのまま、ログだけ強化）
 import crypto from "node:crypto";
-import { db } from "../../lib/firestore.js";
+import { db } from "../lib/firestore.js";
 
 export const config = { api: { bodyParser: false } };
 export const runtime = "nodejs18.x";

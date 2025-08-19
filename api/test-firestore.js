@@ -1,5 +1,5 @@
 // /api/test-firestore.js
-import { db } from "../../lib/firestore.js";
+import { db } from "../lib/firestore.js";
 
 export default async function handler(req, res) {
   try {
