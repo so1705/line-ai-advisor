@@ -1,7 +1,7 @@
 // /api/_ai-push.js
-import { generateAdvice } from "../lib/ai.js";
-import { pushMessage } from "../lib/line.js";
-import { db } from "../lib/firestore.js";
+import { generateAdvice } from "../../lib/ai.js";
+import { pushMessage } from "../../lib/line.js";
+import { db } from "../../lib/firestore.js";
 
 export const config = { runtime: "nodejs18.x" };
 
