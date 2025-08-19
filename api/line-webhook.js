@@ -1,5 +1,6 @@
 // /api/line-webhook.js
 import crypto from "node:crypto";
+import { db } from "../lib/firestore.js";  // 相対パス注意
 export const config = { api: { bodyParser: false } };
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 
@@ -15,10 +16,10 @@ function verifySignature(headers, raw, secret) {
 export default async function handler(req, res) {
   if (req.method !== "POST") { res.status(405).end(); return; }
 
-  // ① まず即200（検証が落ちない）
+  // ① 即200（検証を確実に通す）
   res.status(200).send("ok");
 
-  // ② 応答後に署名だけログ（失敗しても無視）
+  // ② 応答後の処理（失敗してもOK）
   try {
     let raw = "";
     await new Promise(resolve => {
@@ -26,9 +27,24 @@ export default async function handler(req, res) {
       req.on("data", c => raw += c);
       req.on("end", resolve);
     });
+
     const ok = verifySignature(req.headers, raw, CHANNEL_SECRET);
-    if (!ok) console.warn("[webhook] signature NG (logged only)");
+    if (!ok) console.warn("[webhook] signature NG");
+
+    let body = {};
+    try { body = JSON.parse(raw); } catch {}
+    const ev = Array.isArray(body.events) ? body.events[0] : null;
+
+    // Firestoreへ軽量ログ
+    try {
+      await db.collection("logs").doc("lastWebhook").set(
+        { at: new Date().toISOString(), eventType: ev?.type || "unknown" },
+        { merge: true }
+      );
+    } catch (e) {
+      console.error("[webhook] firestore log err:", e);
+    }
   } catch (e) {
-    console.error("[webhook] post-log error:", e);
+    console.error("[webhook] post process fatal:", e);
   }
 }
