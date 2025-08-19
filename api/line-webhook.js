@@ -1,4 +1,4 @@
-// /api/line-webhook.js（ACK+委譲はそのまま、ログだけ強化）
+// /api/line-webhook.js（ACK+委譲・ログ強化）
 import crypto from "node:crypto";
 import { db } from "../lib/firestore.js";
 
@@ -11,9 +11,9 @@ const LINE_HEAD = () => ({
   "Content-Type": "application/json",
   Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
 });
-const WORKER_URL =
-  process.env.WORKER_URL // ← 任意。設定してなければ自動推定
-  || `https://${process.env.VERCEL_URL || "line-ai-advisor.vercel.app"}/api/_ai-push`;
+const ORIGIN = process.env.WORKER_ORIGIN
+  || `https://${process.env.VERCEL_URL || "line-ai-advisor.vercel.app"}`;
+const WORKER_PATHS = ["/api/_ai-push"]; // 必要なら "/api/ai-push" を追加
 
 function readRaw(req) {
   return new Promise((resolve, reject) => {
@@ -67,7 +67,7 @@ export default async function handler(req, res) {
 
   if (!sigOK) return res.status(200).send("ok");
 
-  // (A) ACKを同期で実行し、失敗はFirestoreへ
+  // (A) まずACKを同期返信
   for (const ev of events) {
     if (ev.type === "message" && ev.message?.type === "text" && ev.replyToken) {
       try {
@@ -78,10 +78,10 @@ export default async function handler(req, res) {
     }
   }
 
-  // ここでWebhookは終了
+  // Webhookはここで完了
   res.status(200).send("ok");
 
-  // (B) AI生成は _ai-push に委譲。呼び出し結果をログ
+  // (B) AI生成はワーカーに委譲（結果はFirestoreに記録）
   for (const ev of events) {
     if (ev.type === "message" && ev.message?.type === "text") {
       const userId = ev?.source?.userId;
@@ -89,7 +89,8 @@ export default async function handler(req, res) {
       if (!userId || !text) continue;
 
       try {
-        const r = await fetch(WORKER_URL, {
+        const path = WORKER_PATHS[0];
+        const r = await fetch(`${ORIGIN}${path}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -99,7 +100,7 @@ export default async function handler(req, res) {
         });
         if (!r.ok) {
           const t = await r.text().catch(() => "");
-          await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500) });
+          await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500), path });
         }
       } catch (e) {
         await logError({ at, type: "ai_push_fetch_error", message: String(e) });
