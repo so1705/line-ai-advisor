@@ -3,28 +3,29 @@ import { generateAdvice } from "../lib/ai.js";
 import { pushMessage } from "../lib/line.js";
 import { db } from "../lib/firestore.js";
 
-export const config = { runtime: "nodejs" };  // ← 修正！（"nodejs18.x" → "nodejs"）
+export const config = { runtime: "nodejs" };
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
+  // 簡易認証
   const key = req.headers["x-worker-key"];
   if (!key || key !== process.env.WORKER_KEY) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
 
-  const { userId, text } = await readJson(req).catch(() => ({}));
-  if (!userId || !text) return res.status(400).json({ ok: false, error: "missing fields" });
+  const { to, text } = await readJson(req).catch(() => ({}));
+  if (!to || !text) return res.status(400).json({ ok: false, error: "missing fields" });
 
   try {
     const advice = await generateAdvice(text);
-    await pushMessage(userId, [{ type: "text", text: advice }]);
+    await pushMessage(to, [{ type: "text", text: advice }]);
     return res.status(200).json({ ok: true });
   } catch (e) {
     try {
       await db.collection("logs").doc("errors").collection("items")
         .doc(Date.now().toString())
-        .set({ type: "ai_push_error", message: String(e), input: text });
+        .set({ type: "ai_push_error", message: String(e), input: text, to });
     } catch {}
     return res.status(500).json({ ok: false, error: String(e) });
   }

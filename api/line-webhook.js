@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { db } from "../lib/firestore.js";
 
 export const config = { api: { bodyParser: false } };
-export const runtime = "nodejs"; // ← 修正
+export const runtime = "nodejs";
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 const LINE_BASE = "https://api.line.me/v2/bot";
@@ -50,7 +50,7 @@ async function logError(payload) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") { res.setHeader("Allow","POST"); return res.status(405).send("Method Not Allowed"); }
+  if (req.method !== "POST") { res.setHeader("Allow", "POST"); return res.status(405).send("Method Not Allowed"); }
 
   const raw = await readRaw(req);
   const at = new Date().toISOString();
@@ -59,13 +59,16 @@ export default async function handler(req, res) {
   let body = {}; try { body = JSON.parse(raw.toString("utf-8")); } catch {}
   const events = Array.isArray(body.events) ? body.events : [];
 
+  // 直近ログ（デバッグ用）
   try {
     await db.collection("logs").doc("lastWebhook")
       .set({ at, sigOK, count: events.length, sample: events[0] ?? null }, { merge: true });
   } catch {}
 
+  // 署名NGでも 200 を返す（LINE検証通しつつ、後続では何もしない）
   if (!sigOK) return res.status(200).send("ok");
 
+  // (A) まずACK（即時返信）
   for (const ev of events) {
     if (ev.type === "message" && ev.message?.type === "text" && ev.replyToken) {
       try {
@@ -76,30 +79,36 @@ export default async function handler(req, res) {
     }
   }
 
+  // Webhookはここで完了させる（タイムアウト回避）
   res.status(200).send("ok");
 
+  // (B) AI生成はワーカーへ委譲（userId / groupId / roomId を包括的にサポート）
   for (const ev of events) {
-    if (ev.type === "message" && ev.message?.type === "text") {
-      const userId = ev?.source?.userId;
-      const text = (ev.message.text || "").trim();
-      if (!userId || !text) continue;
+    if (ev.type !== "message" || ev.message?.type !== "text") continue;
 
-      try {
-        const r = await fetch(WORKER_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Worker-Key": process.env.WORKER_KEY || "",
-          },
-          body: JSON.stringify({ userId, text }),
-        });
-        if (!r.ok) {
-          const t = await r.text().catch(() => "");
-          await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500) });
-        }
-      } catch (e) {
-        await logError({ at, type: "ai_push_fetch_error", message: String(e) });
+    const to =
+      ev?.source?.userId   // 1:1
+      || ev?.source?.groupId // グループ
+      || ev?.source?.roomId; // 複数人ルーム
+
+    const text = (ev.message.text || "").trim();
+    if (!to || !text) continue;
+
+    try {
+      const r = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Worker-Key": process.env.WORKER_KEY || "",
+        },
+        body: JSON.stringify({ to, text }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500) });
       }
+    } catch (e) {
+      await logError({ at, type: "ai_push_fetch_error", message: String(e) });
     }
   }
 }
