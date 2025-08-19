@@ -1,4 +1,4 @@
-// /api/line-webhook.js
+// /api/line-webhook.js （ESM・Nodeランタイム）
 import crypto from "node:crypto";
 import { db } from "../lib/firestore.js";
 
@@ -17,40 +17,38 @@ function verifySignature(headers, raw, secret) {
 export default async function handler(req, res) {
   if (req.method !== "POST") { res.status(405).end(); return; }
 
+  // ★ まず即200を返す（検証のタイムアウト防止）
+  res.status(200).send("ok");
+
+  // ↓ここからは “応答後” に非同期で処理（awaitしない）
   try {
-    // 1) 生ボディをサッと取得（数百バイト～数KB）
     let raw = "";
-    await new Promise(resolve => {
-      req.setEncoding("utf8");
-      req.on("data", c => (raw += c));
-      req.on("end", resolve);
+    req.setEncoding("utf8");
+    req.on("data", c => (raw += c));
+    req.on("end", async () => {
+      try {
+        const sigOK = verifySignature(req.headers, raw, CHANNEL_SECRET);
+        if (!sigOK) console.warn("[webhook] signature NG");
+
+        let body = {};
+        try { body = JSON.parse(raw); } catch {}
+        const first = Array.isArray(body.events) ? body.events[0] : null;
+        const eventType = first?.type ?? "none";
+
+        // 軽量ログ（失敗しても無視）
+        try {
+          await db.collection("logs").doc("lastWebhook").set(
+            { at: new Date().toISOString(), lastEvent: eventType },
+            { merge: true }
+          );
+        } catch (e) {
+          console.error("[webhook] firestore log err:", e);
+        }
+      } catch (e) {
+        console.error("[webhook] post process fatal:", e);
+      }
     });
-
-    // 2) 署名はチェック（失敗しても処理は継続）
-    const sigOK = verifySignature(req.headers, raw, CHANNEL_SECRET);
-    if (!sigOK) console.warn("[webhook] signature NG");
-
-    // 3) JSON化して最小情報を抽出（検証は events なし＝none になるのが正常）
-    let body = {};
-    try { body = JSON.parse(raw); } catch {}
-    const first = Array.isArray(body.events) ? body.events[0] : null;
-    const eventType = first?.type ?? "none";
-
-    // 4) Firestoreへ “軽量ログ” を先に書く（失敗しても握りつぶす）
-    try {
-      await db.collection("logs").doc("lastWebhook").set(
-        { at: new Date().toISOString(), lastEvent: eventType },
-        { merge: true }
-      );
-    } catch (e) {
-      console.error("[webhook] firestore log err:", e);
-    }
-
-    // 5) 最後に200を返す（ここまで数十msで終わります）
-    res.status(200).send("ok");
   } catch (e) {
-    console.error("[webhook] fatal:", e);
-    // 検証を落とさない
-    res.status(200).send("ok");
+    console.error("[webhook] outer fatal:", e);
   }
 }
