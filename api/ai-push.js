@@ -29,8 +29,8 @@ async function pushToLine(to, text) {
 
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
-    console.error("[ai-push] LINE push failed", resp.status, t);
-    throw new Error(`LINE push failed: ${resp.status}`);
+    console.error("[ai-push] LINE reply failed", resp.status, t);
+    throw new Error(`LINE reply failed: ${resp.status}`);
   }
 }
 
