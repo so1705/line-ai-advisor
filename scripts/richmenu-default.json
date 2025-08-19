@@ -6,11 +6,7 @@
   "areas": [
     {
       "bounds": { "x": 0, "y": 0, "width": 2500, "height": 843 },
-      "action": {
-        "type": "richmenuswitch",
-        "richMenuAliasId": "advisor_on",
-        "data": "toggle=on"
-      }
+      "action": { "type": "richmenuswitch", "richMenuAliasId": "advisor_on", "data": "toggle=on" }
     }
   ]
 }

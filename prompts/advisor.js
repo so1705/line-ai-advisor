@@ -1,5 +1,5 @@
 // /prompts/advisor.js
-// 返答の方針をここで管理。運用で文言調整したい時はこのファイルだけ触ればOK。
+// 返答の方針はここで管理（運用で調整しやすいように分離）
 export function buildAdvisorPrompt(userText) {
   return [
     "あなたは就活アドバイザーです。",

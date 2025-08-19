@@ -12,7 +12,7 @@ const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET ?? "";
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 
-// 追加: AIメニュー（リッチメニューB）のID
+// 追加: AIメニュー（B）の richMenuId
 const ADVISOR_RICHMENU_ID = process.env.ADVISOR_RICHMENU_ID ?? "";
 
 // デバッグ期間中は false（通ることを確認できたら true に戻す）
@@ -23,7 +23,6 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // ==== Utils ====
-
 // Edge(Web Crypto)での LINE 署名検証
 const te = new TextEncoder();
 async function verify(request, rawBody) {
@@ -38,11 +37,8 @@ async function verify(request, rawBody) {
       ["sign"]
     );
     const signature = await crypto.subtle.sign("HMAC", key, te.encode(rawBody));
-    const expected = btoa(
-      String.fromCharCode(...new Uint8Array(signature))
-    );
+    const expected = btoa(String.fromCharCode(...new Uint8Array(signature)));
 
-    // constant-time 風比較
     if (expected.length !== sigHeader.length) return false;
     let diff = 0;
     for (let i = 0; i < expected.length; i++) {
@@ -62,12 +58,8 @@ async function reply(replyToken, text) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{ type: "text", text }],
-    }),
+    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
   });
-
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     console.error("LINE reply error:", res.status, body);
@@ -82,12 +74,8 @@ async function push(userId, text) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify({
-      to: userId,
-      messages: [{ type: "text", text }],
-    }),
+    body: JSON.stringify({ to: userId, messages: [{ type: "text", text }] }),
   });
-
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     console.error("LINE push error:", res.status, body);
@@ -124,20 +112,11 @@ export async function POST(request) {
         // 1) すぐ軽いACKを返す（タイムアウト回避）
         await reply(ev.replyToken, "受け付けました。少しお待ちください…");
 
-        // 2) AIモードかどうか判定（A: richmenuswitch 方式）
-        const advisorOn = await isAdvisorMode(
-          userId,
-          CHANNEL_ACCESS_TOKEN,
-          ADVISOR_RICHMENU_ID
-        );
-
+        // 2) A/Bのどちらがリンク中かでAIを切替（richmenuswitch方式）
+        const advisorOn = await isAdvisorMode(userId, CHANNEL_ACCESS_TOKEN, ADVISOR_RICHMENU_ID);
         if (!advisorOn) {
-          // 通常モード：AIは動かさず、案内のみ
           if (userId) {
-            await push(
-              userId,
-              "AIアドバイザーを使うには、リッチメニューの『AI相談』をタップしてください。"
-            );
+            await push(userId, "AIアドバイザーを使うには、リッチメニューの『AI相談』をタップしてください。");
           }
           continue;
         }
@@ -146,10 +125,7 @@ export async function POST(request) {
         if (userId) {
           const prompt = buildAdvisorPrompt(q);
           const r = await model.generateContent(prompt);
-          const text =
-            r?.response?.text?.() ??
-            "すみません、少し混み合っています。もう一度お試しください。";
-
+          const text = r?.response?.text?.() ?? "すみません、少し混み合っています。もう一度お試しください。";
           await push(userId, text);
         }
       } else {
