@@ -1,101 +1,99 @@
-export const runtime = "edge";
-
+// Nodeランタイム (Edge不可)
 import crypto from "node:crypto";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getUserState, setUserState } from "@/lib/firestore";
+import { replyMessage, pushMessage } from "@/lib/line";
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
-const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-// デバッグ用：最初は false にして署名を必須にしない（疎通確認できたら true に戻す）
-const ENFORCE_SIGNATURE = false;
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // 署名検証
-function verify(request, raw) {
-  const sig = request.headers.get("x-line-signature");
-  if (!sig) return false;
-  const h = crypto.createHmac("sha256", CHANNEL_SECRET);
-  h.update(raw, "utf8");
-  const digest = h.digest("base64");
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(digest));
-  } catch {
-    return false;
-  }
+function verifySignature(req, rawBody) {
+  const signature = req.headers["x-line-signature"];
+  if (!signature) return false;
+  const hmac = crypto.createHmac("sha256", CHANNEL_SECRET);
+  hmac.update(rawBody);
+  const digest = hmac.digest("base64");
+  try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest)); }
+  catch { return false; }
 }
 
-// LINE返信
-async function reply(replyToken, text) {
-  const res = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
+export const config = { api: { bodyParser: false } }; // 生ボディ取得
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).end();
+
+  // 生ボディ取得
+  let raw = "";
+  await new Promise((resolve) => {
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", resolve);
   });
-  if (!res.ok) {
-    const body = await res.text();
-    console.error("LINE reply error:", res.status, body);
-  }
-}
 
-export async function POST(request) {
-  const raw = await request.text();
-
-  // 署名チェック（デバッグ期間はスキップ可）
-  if (ENFORCE_SIGNATURE && !verify(request, raw)) {
-    console.warn("Signature validation failed");
-    return new Response("Signature validation failed", { status: 401 });
+  // 署名チェック
+  if (!verifySignature(req, raw)) {
+    console.warn("Signature NG");
+    return res.status(401).send("bad signature");
   }
 
   let body;
-  try {
-    body = JSON.parse(raw);
-  } catch (e) {
-    console.error("JSON parse error:", e);
-    return new Response("Bad Request", { status: 400 });
-  }
+  try { body = JSON.parse(raw); } 
+  catch (e) { console.error("JSON parse error", e); return res.status(400).send("bad body"); }
 
   const events = body?.events ?? [];
   for (const ev of events) {
+    const userId = ev.source?.userId;
+
     try {
-      if (ev.type === "message" && ev.message?.type === "text") {
-        const q = (ev.message.text ?? "").trim();
-
-        // 1) すぐ返す（タイムアウト回避用の軽い文）
-        await reply(ev.replyToken, "受け付けました。少しお待ちください。");
-
-        // 2) その後の内容は push で送る（ユーザーIDが必要）
-        //    ※ まずは reply だけで十分なら、下の push を省略して reply に一本化でもOK
-        const userId = ev.source?.userId;
-        if (userId) {
-          const r = await model.generateContent(
-            "あなたは就活アドバイザー。分かりやすく、次の一歩を3つ提案してください。\n\n質問:" + q
-          );
-          const text = (r.response.text() ?? "").slice(0, 4500) || "うまく応答できませんでした。";
-
-          // push 送信
-          await fetch("https://api.line.me/v2/bot/message/push", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-            },
-            body: JSON.stringify({ to: userId, messages: [{ type: "text", text }] }),
-          });
-        }
-      } else {
-        // 未対応イベントは無視せずログに残す
-        console.log("Unhandled event:", JSON.stringify(ev));
+      // Postback: ai:toggle
+      if (ev.type === "postback" && ev.postback?.data === "ai:toggle") {
+        const state = (userId ? await getUserState(userId) : null) || { aiMode: "off" };
+        const next = state.aiMode === "on" ? "off" : "on";
+        if (userId) await setUserState(userId, { aiMode: next });
+        await replyMessage(ev.replyToken, { type: "text", text: `AI面談を${next === "on" ? "開始" : "終了"}しました。` });
+        continue;
       }
+
+      // Text message
+      if (ev.type === "message" && ev.message?.type === "text") {
+        // 状態を確認
+        const state = (userId ? await getUserState(userId) : null) || { aiMode: "off" };
+
+        if (state.aiMode !== "on") {
+          await replyMessage(ev.replyToken, { type: "text", text: "質問ありがとうございます。AI面談はメニューから開始できます。" });
+          continue;
+        }
+
+        // まず軽く即返信（タイムアウト対策）
+        await replyMessage(ev.replyToken, { type: "text", text: "受け付けました。少しお待ちください。" });
+
+        // ★ここで本来はAIを呼ぶ。まずはダミー返答（短いテンプレ）
+        const text = buildShortAnswer(ev.message.text);
+
+        if (userId) {
+          await pushMessage(userId, { type: "text", text });
+        }
+        continue;
+      }
+
+      // それ以外はログ
+      console.log("Unhandled event", JSON.stringify(ev));
     } catch (e) {
-      console.error("Event handling error:", e);
-      // replyToken は 1回しか使えないので、ここでの追加返信は基本しない
+      console.error("Event error", e);
+      // replyToken は1回なのでここでは無理に返信しない
     }
   }
-  return new Response("ok", { status: 200 });
+
+  return res.status(200).send("ok");
+}
+
+// 分量を常に短くまとめるダミー回答（本番はAIに差し替え）
+function buildShortAnswer(q) {
+  const tldr = `要点: ${q.slice(0, 60)}... への回答を簡潔にまとめます。`;
+  const bullets = [
+    "結論を先に：まず1つだけ行動する（例：企業研究のテンプレ作成）",
+    "次に：30分でできるタスクに分解（3ステップ以内）",
+    "最後に：今日のうちに1タスクを必ず完了",
+  ];
+  const next = "次の一歩：今から30分計測して、1社分の企業研究テンプレを作成。";
+  return `${tldr}\n- ${bullets.join("\n- ")}\n${next}`;
 }
