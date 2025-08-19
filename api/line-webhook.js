@@ -1,4 +1,4 @@
-// /api/line-webhook.js（ACK+委譲・ログ強化）
+// /api/line-webhook.js
 import crypto from "node:crypto";
 import { db } from "../lib/firestore.js";
 
@@ -11,9 +11,13 @@ const LINE_HEAD = () => ({
   "Content-Type": "application/json",
   Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
 });
-const ORIGIN = process.env.WORKER_ORIGIN
-  || `https://${process.env.VERCEL_URL || "line-ai-advisor.vercel.app"}`;
-const WORKER_PATHS = ["/api/_ai-push"]; // 必要なら "/api/ai-push" を追加
+
+// 呼び出し先は2パス用意（/_ai-push と /ai-push）し、どちらか成功すればOK
+const ORIGIN = `https://${process.env.VERCEL_URL || "line-ai-advisor.vercel.app"}`;
+const WORKER_PATHS = [
+  "/api/_ai-push",
+  "/api/ai-push",
+];
 
 function readRaw(req) {
   return new Promise((resolve, reject) => {
@@ -50,7 +54,7 @@ async function logError(payload) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") { res.setHeader("Allow","POST"); return res.status(405).send("Method Not Allowed"); }
+  if (req.method !== "POST") { res.setHeader("Allow", "POST"); return res.status(405).send("Method Not Allowed"); }
 
   const raw = await readRaw(req);
   const at = new Date().toISOString();
@@ -67,7 +71,7 @@ export default async function handler(req, res) {
 
   if (!sigOK) return res.status(200).send("ok");
 
-  // (A) まずACKを同期返信
+  // (A) まずACK（即時返信）
   for (const ev of events) {
     if (ev.type === "message" && ev.message?.type === "text" && ev.replyToken) {
       try {
@@ -78,10 +82,10 @@ export default async function handler(req, res) {
     }
   }
 
-  // Webhookはここで完了
+  // Webhookはここで完了させる
   res.status(200).send("ok");
 
-  // (B) AI生成はワーカーに委譲（結果はFirestoreに記録）
+  // (B) AI生成はワーカーに委譲（両パスを順に試す）
   for (const ev of events) {
     if (ev.type === "message" && ev.message?.type === "text") {
       const userId = ev?.source?.userId;
@@ -89,18 +93,22 @@ export default async function handler(req, res) {
       if (!userId || !text) continue;
 
       try {
-        const path = WORKER_PATHS[0];
-        const r = await fetch(`${ORIGIN}${path}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Worker-Key": process.env.WORKER_KEY || "",
-          },
-          body: JSON.stringify({ userId, text }),
-        });
-        if (!r.ok) {
+        let called = false;
+        for (const path of WORKER_PATHS) {
+          const r = await fetch(`${ORIGIN}${path}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Worker-Key": process.env.WORKER_KEY || "",
+            },
+            body: JSON.stringify({ userId, text }),
+          });
+          if (r.ok) { called = true; break; }
           const t = await r.text().catch(() => "");
-          await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500), path });
+          await logError({ at, type: "ai_push_call_fail", path, status: r.status, body: t.slice(0, 500) });
+        }
+        if (!called) {
+          // どちらのパスも失敗した場合はここで終了（ログは残っている）
         }
       } catch (e) {
         await logError({ at, type: "ai_push_fetch_error", message: String(e) });
