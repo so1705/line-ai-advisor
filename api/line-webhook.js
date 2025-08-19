@@ -3,10 +3,17 @@ export const runtime = "edge";
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+// 追加: モード判定＆プロンプト
+import { isAdvisorMode } from "../lib/richmenu.js";
+import { buildAdvisorPrompt } from "../prompts/advisor.js";
+
 // ==== Env ====
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET ?? "";
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
+
+// 追加: AIメニュー（リッチメニューB）のID
+const ADVISOR_RICHMENU_ID = process.env.ADVISOR_RICHMENU_ID ?? "";
 
 // デバッグ期間中は false（通ることを確認できたら true に戻す）
 const ENFORCE_SIGNATURE = false;
@@ -16,13 +23,12 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // ==== Utils ====
-const te = new TextEncoder();
 
 // Edge(Web Crypto)での LINE 署名検証
+const te = new TextEncoder();
 async function verify(request, rawBody) {
   const sigHeader = request.headers.get("x-line-signature");
   if (!sigHeader) return false;
-
   try {
     const key = await crypto.subtle.importKey(
       "raw",
@@ -36,7 +42,7 @@ async function verify(request, rawBody) {
       String.fromCharCode(...new Uint8Array(signature))
     );
 
-    // constant-time 比較（長さが違えば不一致）
+    // constant-time 風比較
     if (expected.length !== sigHeader.length) return false;
     let diff = 0;
     for (let i = 0; i < expected.length; i++) {
@@ -91,7 +97,7 @@ async function push(userId, text) {
 export async function POST(request) {
   const raw = await request.text();
 
-  // 署名チェック（デバッグ中はスキップ可能）
+  // 署名チェック（デバッグ中はスキップ可）
   if (ENFORCE_SIGNATURE) {
     const ok = await verify(request, raw);
     if (!ok) {
@@ -115,13 +121,30 @@ export async function POST(request) {
         const userId = ev.source?.userId ?? null;
         const q = (ev.message.text ?? "").trim();
 
-        // 1) まず軽いACKをすぐ返す（タイムアウト回避）
+        // 1) すぐ軽いACKを返す（タイムアウト回避）
         await reply(ev.replyToken, "受け付けました。少しお待ちください…");
 
-        // 2) 本回答は push で送る（ユーザーIDがあれば）
+        // 2) AIモードかどうか判定（A: richmenuswitch 方式）
+        const advisorOn = await isAdvisorMode(
+          userId,
+          CHANNEL_ACCESS_TOKEN,
+          ADVISOR_RICHMENU_ID
+        );
+
+        if (!advisorOn) {
+          // 通常モード：AIは動かさず、案内のみ
+          if (userId) {
+            await push(
+              userId,
+              "AIアドバイザーを使うには、リッチメニューの『AI相談』をタップしてください。"
+            );
+          }
+          continue;
+        }
+
+        // 3) AI回答（モードONのときのみ）
         if (userId) {
-          // Gemini で生成
-          const prompt = `あなたは就活アドバイザーです。質問者にとって分かりやすく、次に取るべき一歩まで具体的に答えてください。\n\nユーザーの質問: ${q}`;
+          const prompt = buildAdvisorPrompt(q);
           const r = await model.generateContent(prompt);
           const text =
             r?.response?.text?.() ??

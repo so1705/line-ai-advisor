@@ -1,0 +1,16 @@
+{
+  "size": { "width": 2500, "height": 843 },
+  "selected": false,
+  "name": "advisor_on",
+  "chatBarText": "AIアドバイザー中",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 2500, "height": 843 },
+      "action": {
+        "type": "richmenuswitch",
+        "richMenuAliasId": "default",
+        "data": "toggle=off"
+      }
+    }
+  ]
+}
