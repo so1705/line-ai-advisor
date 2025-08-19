@@ -1,4 +1,4 @@
-// /api/_ai-push.js  （Nodeランタイム）
+// /api/_ai-push.js
 import { generateAdvice } from "../lib/ai.js";
 import { pushMessage } from "../lib/line.js";
 import { db } from "../lib/firestore.js";
@@ -14,12 +14,7 @@ export default async function handler(req, res) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
 
-  let payload = {};
-  try { payload = await readJson(req); } catch (e) {
-    return res.status(400).json({ ok: false, error: "bad json" });
-  }
-
-  const { userId, text } = payload || {};
+  const { userId, text } = await readJson(req);
   if (!userId || !text) return res.status(400).json({ ok: false, error: "missing fields" });
 
   try {
