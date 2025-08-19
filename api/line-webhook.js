@@ -1,114 +1,51 @@
-// /api/line-webhook.js
 import crypto from "node:crypto";
-import { db } from "../lib/firestore.js";
-
-export const config = { api: { bodyParser: false } };
-export const runtime = "nodejs";
+import fetch from "node-fetch";
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
-const LINE_BASE = "https://api.line.me/v2/bot";
-const LINE_HEAD = () => ({
-  "Content-Type": "application/json",
-  Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-});
+const WORKER_KEY = (process.env.WORKER_KEY || "").trim();
 
-const ORIGIN = `https://${process.env.VERCEL_URL || "line-ai-advisor.vercel.app"}`;
-const WORKER_URL = `${ORIGIN}/api/ai-push`;
+// 署名検証には「生ボディ」必須
+export const config = { api: { bodyParser: false } };
 
-function readRaw(req) {
+function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
-function verifySignature(headers, rawBuf, secret) {
-  try {
-    const sig = headers["x-line-signature"];
-    if (!sig || !secret) return false;
-    const mac = crypto.createHmac("sha256", secret).update(rawBuf).digest("base64");
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(mac));
-  } catch { return false; }
-}
-async function replyMessage(replyToken, messages) {
-  const res = await fetch(`${LINE_BASE}/message/reply`, {
-    method: "POST",
-    headers: LINE_HEAD(),
-    body: JSON.stringify({ replyToken, messages: [].concat(messages) }),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`LINE reply ${res.status}: ${t}`);
-  }
-}
-async function logError(payload) {
-  try {
-    await db.collection("logs").doc("errors").collection("items")
-      .doc(Date.now().toString()).set(payload);
-  } catch {}
+
+function verifySignature(req, rawBody) {
+  const sig = req.headers["x-line-signature"];
+  if (!sig || !CHANNEL_SECRET) return false;
+  const hmac = crypto.createHmac("sha256", CHANNEL_SECRET);
+  hmac.update(rawBody, "utf8");
+  return sig === hmac.digest("base64");
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") { res.setHeader("Allow", "POST"); return res.status(405).send("Method Not Allowed"); }
-
-  const raw = await readRaw(req);
-  const at = new Date().toISOString();
-  const sigOK = verifySignature(req.headers, raw, CHANNEL_SECRET);
-
-  let body = {}; try { body = JSON.parse(raw.toString("utf-8")); } catch {}
-  const events = Array.isArray(body.events) ? body.events : [];
-
-  // 直近ログ（デバッグ用）
   try {
-    await db.collection("logs").doc("lastWebhook")
-      .set({ at, sigOK, count: events.length, sample: events[0] ?? null }, { merge: true });
-  } catch {}
+    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-  // 署名NGでも 200 を返す（LINE検証通しつつ、後続では何もしない）
-  if (!sigOK) return res.status(200).send("ok");
+    const rawBody = await readRawBody(req);
+    if (!verifySignature(req, rawBody)) return res.status(401).send("Signature validation failed");
 
-  // (A) まずACK（即時返信）
-  for (const ev of events) {
-    if (ev.type === "message" && ev.message?.type === "text" && ev.replyToken) {
-      try {
-        await replyMessage(ev.replyToken, [{ type: "text", text: "受け付けました。少々お待ちください。" }]);
-      } catch (e) {
-        await logError({ at, type: "reply_fail", message: String(e) });
-      }
-    }
-  }
+    // 先にACK（タイムアウト回避）
+    res.status(200).send("OK");
 
-  // Webhookはここで完了させる（タイムアウト回避）
-  res.status(200).send("ok");
-
-  // (B) AI生成はワーカーへ委譲（userId / groupId / roomId を包括的にサポート）
-  for (const ev of events) {
-    if (ev.type !== "message" || ev.message?.type !== "text") continue;
-
-    const to =
-      ev?.source?.userId   // 1:1
-      || ev?.source?.groupId // グループ
-      || ev?.source?.roomId; // 複数人ルーム
-
-    const text = (ev.message.text || "").trim();
-    if (!to || !text) continue;
-
-    try {
-      const r = await fetch(WORKER_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Worker-Key": process.env.WORKER_KEY || "",
-        },
-        body: JSON.stringify({ to, text }),
-      });
-      if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        await logError({ at, type: "ai_push_call_fail", status: r.status, body: t.slice(0, 500) });
-      }
-    } catch (e) {
-      await logError({ at, type: "ai_push_fetch_error", message: String(e) });
-    }
+    // 同一ホストの ai-push に、生ボディのまま委譲
+    const baseURL = `https://${req.headers["host"]}`;
+    fetch(`${baseURL}/api/ai-push`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${WORKER_KEY}`,
+      },
+      body: rawBody,
+    }).catch((e) => console.error("[webhook] delegate error", e));
+  } catch (e) {
+    console.error("[webhook] fatal", e);
+    try { res.status(200).send("OK"); } catch {}
   }
 }

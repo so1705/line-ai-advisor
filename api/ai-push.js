@@ -1,51 +1,63 @@
-// 最終切り分け用の一時パッチ（Node / API Routes 版）
-// 認証の成否をログで可視化し、200/401で返すだけの最小ハンドラ
-// ※デバッグが終わったら note と console.log は削除してください
+import fetch from "node-fetch";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const WORKER_KEY = (process.env.WORKER_KEY || "").trim();
+const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+async function replyToLine(replyToken, text) {
+  const resp = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${CHANNEL_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    console.error("[ai-push] LINE reply failed", resp.status, t);
+    throw new Error(`LINE reply failed: ${resp.status}`);
+  }
+}
 
 export default async function handler(req, res) {
   try {
-    // 1) ヘッダー取得（Authorization / x-worker-key の両対応）
-    const raw =
-      req.headers['authorization'] ??
-      req.headers['Authorization'] ??
-      req.headers['x-worker-key'] ??
-      req.headers['X-Worker-Key'] ??
-      '';
-
-    // 2) 正規化（"Bearer " を外し、前後空白を除去）
-    const token = String(raw).replace(/^Bearer\s+/i, '').trim();
-
-    // 3) 環境変数（空白/改行混入の事故防止で trim）
-    const envKey = String(process.env.WORKER_KEY || '').trim();
-
-    const hasEnv = Boolean(envKey);
-    const hasHeader = Boolean(raw);
-    const matches = hasEnv && Boolean(token) && token === envKey;
-
-    // 4) 安全ログ（値そのものは出さない）
-    console.log(
-      JSON.stringify({
-        ctx: 'ai-push-auth',
-        hasEnv,
-        hasHeader,
-        tokenLen: token.length,
-        matches,
-      })
-    );
-
-    // 5) 認証判定
-    if (!matches) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    // WORKER_KEY 認証（Bearer / x-worker-key 両対応）
+    const rawAuth =
+      req.headers["authorization"] ||
+      req.headers["Authorization"] ||
+      req.headers["x-worker-key"] ||
+      req.headers["X-Worker-Key"] || "";
+    const token = String(rawAuth).replace(/^Bearer\s+/i, "").trim();
+    if (!WORKER_KEY || !token || token !== WORKER_KEY) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
-    // 6) 認証OK（デバッグ用の仮レスポンス）
-    return res
-      .status(200)
-      .json({ ok: true, note: 'auth passed (tmp)' });
+    // WebhookのJSON
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
+    const events = Array.isArray(body?.events) ? body.events : [];
+    if (!events.length) return res.status(200).json({ ok: true, note: "no events" });
 
-    // TODO: 認証が通ることを確認後、上の仮レスを削除して本来の処理へ差し替え
-  } catch (err) {
-    console.error('ai-push fatal', err);
-    return res.status(500).json({ ok: false, error: 'internal' });
+    // 最初のテキストメッセージだけ応答（必要ならループ化）
+    const ev = events.find(e => e?.type === "message" && e?.message?.type === "text");
+    if (!ev) return res.status(200).json({ ok: true, note: "no text message" });
+
+    const userText = ev.message.text || "";
+    const prompt =
+      "あなたは就活アドバイザーです。ユーザーの質問に丁寧に答え、" +
+      "最後に『次の一歩』を3つ提案してください。\n\n質問: " + userText;
+
+    const result = await model.generateContent(prompt);
+    const aiText = (await result.response.text()).slice(0, 4500) || "回答できませんでした。";
+
+    await replyToLine(ev.replyToken, aiText);
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("[ai-push] fatal", e);
+    return res.status(500).json({ ok: false, error: "internal" });
   }
 }
