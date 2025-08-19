@@ -1,80 +1,143 @@
-// api/line-webhook.js
-import crypto from "node:crypto";
-import fetch from "node-fetch";
+// /api/line-webhook.js
+export const runtime = "edge";
 
-const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
-const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const WORKER_KEY = (process.env.WORKER_KEY || "").trim();
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 署名検証には生ボディ必須
-export const config = { api: { bodyParser: false } };
+// ==== Env ====
+const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET ?? "";
+const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
+// デバッグ期間中は false（通ることを確認できたら true に戻す）
+const ENFORCE_SIGNATURE = false;
+
+// ==== Gemini ====
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+// ==== Utils ====
+const te = new TextEncoder();
+
+// Edge(Web Crypto)での LINE 署名検証
+async function verify(request, rawBody) {
+  const sigHeader = request.headers.get("x-line-signature");
+  if (!sigHeader) return false;
+
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      te.encode(CHANNEL_SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signature = await crypto.subtle.sign("HMAC", key, te.encode(rawBody));
+    const expected = btoa(
+      String.fromCharCode(...new Uint8Array(signature))
+    );
+
+    // constant-time 比較（長さが違えば不一致）
+    if (expected.length !== sigHeader.length) return false;
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) {
+      diff |= expected.charCodeAt(i) ^ sigHeader.charCodeAt(i);
+    }
+    return diff === 0;
+  } catch {
+    return false;
+  }
 }
 
-function verifySignature(req, rawBody) {
-  const sig = req.headers["x-line-signature"];
-  if (!sig || !CHANNEL_SECRET) return false;
-  const hmac = crypto.createHmac("sha256", CHANNEL_SECRET);
-  hmac.update(rawBody, "utf8");
-  return sig === hmac.digest("base64");
-}
-
-async function replyToLine(replyToken, text) {
-  await fetch("https://api.line.me/v2/bot/message/reply", {
+// 返信（reply）API
+async function reply(replyToken, text) {
+  const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${CHANNEL_ACCESS_TOKEN}`,
+      Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
-  }).catch((e) => console.error("[webhook] reply failed", e));
+    body: JSON.stringify({
+      replyToken,
+      messages: [{ type: "text", text }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("LINE reply error:", res.status, body);
+  }
 }
 
-export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+// push API
+async function push(userId, text) {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [{ type: "text", text }],
+    }),
+  });
 
-    const rawBody = await readRawBody(req);
-    if (!verifySignature(req, rawBody)) {
-      return res.status(401).send("Signature validation failed");
-    }
-
-    // 先にACK（LINEのタイムアウト回避）
-    res.status(200).send("OK");
-
-    // 受付返信（任意）
-    let body = {};
-    try { body = JSON.parse(rawBody); } catch {}
-    const ev = Array.isArray(body?.events) ? body.events.find(e => e?.type === "message") : null;
-    if (ev?.replyToken) {
-      replyToLine(ev.replyToken, "受け付けました。AIが回答を作成中です…");
-    }
-
-    // ai-push へ委譲（to と text だけを渡す：Push API 用）
-    const to =
-      ev?.source?.userId || ev?.source?.groupId || ev?.source?.roomId || "";
-    const text = ev?.message?.type === "text" ? (ev?.message?.text || "") : "";
-
-    if (to && text) {
-      const baseURL = `https://${req.headers["host"]}`;
-      fetch(`${baseURL}/api/ai-push`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${WORKER_KEY}`,
-        },
-        body: JSON.stringify({ to, text }),
-      }).catch((e) => console.error("[webhook] delegate error", e));
-    }
-  } catch (e) {
-    console.error("[webhook] fatal", e);
-    try { res.status(200).send("OK"); } catch {}
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("LINE push error:", res.status, body);
   }
+}
+
+export async function POST(request) {
+  const raw = await request.text();
+
+  // 署名チェック（デバッグ中はスキップ可能）
+  if (ENFORCE_SIGNATURE) {
+    const ok = await verify(request, raw);
+    if (!ok) {
+      console.warn("Signature validation failed");
+      return new Response("Signature validation failed", { status: 400 });
+    }
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch (e) {
+    console.error("JSON parse error:", e);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  const events = body?.events ?? [];
+  for (const ev of events) {
+    try {
+      if (ev.type === "message" && ev.message?.type === "text") {
+        const userId = ev.source?.userId ?? null;
+        const q = (ev.message.text ?? "").trim();
+
+        // 1) まず軽いACKをすぐ返す（タイムアウト回避）
+        await reply(ev.replyToken, "受け付けました。少しお待ちください…");
+
+        // 2) 本回答は push で送る（ユーザーIDがあれば）
+        if (userId) {
+          // Gemini で生成
+          const prompt = `あなたは就活アドバイザーです。質問者にとって分かりやすく、次に取るべき一歩まで具体的に答えてください。\n\nユーザーの質問: ${q}`;
+          const r = await model.generateContent(prompt);
+          const text =
+            r?.response?.text?.() ??
+            "すみません、少し混み合っています。もう一度お試しください。";
+
+          await push(userId, text);
+        }
+      } else {
+        // 未対応イベントもログに残す
+        console.log("Unhandled event:", JSON.stringify(ev));
+      }
+    } catch (e) {
+      console.error("Event handling error:", e);
+      // replyToken は1回しか使えないためここでは返さない
+    }
+  }
+
+  return new Response("ok", { status: 200 });
 }
