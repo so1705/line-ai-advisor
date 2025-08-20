@@ -1,12 +1,20 @@
 {
   "size": { "width": 2500, "height": 1686 },
-  "selected": false,
-  "name": "advisor_on_v2",
-  "chatBarText": "AIアドバイザー中",
+  "selected": true,
+  "name": "default_v2_message",
+  "chatBarText": "メニュー",
   "areas": [
     {
-      "bounds": { "x": 0, "y": 0, "width": 2500, "height": 1686 },
-      "action": { "type": "richmenuswitch", "richMenuAliasId": "default", "data": "toggle=off" }
+      "bounds": { "x": 0, "y": 0, "width": 1250, "height": 800 },
+      "action": { "type": "uri", "label": "会員登録", "uri": "https://example.com/signup" }
+    },
+    {
+      "bounds": { "x": 1250, "y": 0, "width": 1250, "height": 800 },
+      "action": { "type": "uri", "label": "インターン求人一覧", "uri": "https://example.com/jobs" }
+    },
+    {
+      "bounds": { "x": 0, "y": 800, "width": 2500, "height": 886 },
+      "action": { "type": "message", "label": "AIアドバイザー", "text": "AIアドバイザー" }
     }
   ]
 }

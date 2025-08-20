@@ -1,7 +1,7 @@
 {
   "size": { "width": 2500, "height": 1686 },
   "selected": true,
-  "name": "default_v2",
+  "name": "default_v2_message",
   "chatBarText": "メニュー",
   "areas": [
     {
@@ -14,7 +14,7 @@
     },
     {
       "bounds": { "x": 0, "y": 800, "width": 2500, "height": 886 },
-      "action": { "type": "richmenuswitch", "richMenuAliasId": "advisor_on", "data": "toggle=on" }
+      "action": { "type": "message", "label": "AIアドバイザー", "text": "AIアドバイザー" }
     }
   ]
 }

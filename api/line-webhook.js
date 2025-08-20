@@ -110,7 +110,7 @@ export async function POST(request) {
       const userId = ev.source?.userId ?? null;
 
       // ① まず軽い ACK
-      await reply(ev.replyToken, "受け付けました。少しお待ちください…");
+      await reply(ev.replyToken, "分析中です。少しお待ちください…");
 
       // ログ（トークン末尾と AI モード確認に使う ID）
       console.log("ENV check", {
