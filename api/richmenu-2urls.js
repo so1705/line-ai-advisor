@@ -1,4 +1,4 @@
-// /api/richmenu-2urls.js
+// /pages/api/richmenu-2urls.js
 export const runtime = "edge";
 
 const LINE_BASE = "https://api.line.me";
@@ -23,7 +23,7 @@ async function postJSON(path, json) {
   return res.json().catch(() => ({}));
 }
 
-/** 画像アップロード（public 配下の実ファイルURLから Edge で転送） */
+/** 画像アップロード（/public の実URLから Edge で転送） */
 async function putImage(richMenuId, imgUrl, contentType = "image/jpeg") {
   const imgRes = await fetch(imgUrl);
   if (!imgRes.ok) throw new Error(`fetch image failed ${imgRes.status}`);
@@ -44,7 +44,7 @@ async function putImage(richMenuId, imgUrl, contentType = "image/jpeg") {
 
 /** alias を richMenuId に割当（create or update） */
 async function setAlias(aliasId, richMenuId) {
-  // まず作成を試す
+  // 作成
   let res = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias`, {
     method: "POST",
     headers: {
@@ -55,7 +55,7 @@ async function setAlias(aliasId, richMenuId) {
   });
   if (res.ok) return true;
 
-  // 既にあるなら更新
+  // 既存なら更新
   res = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
     method: "POST",
     headers: {
@@ -71,7 +71,7 @@ async function setAlias(aliasId, richMenuId) {
   return true;
 }
 
-/** すべてのユーザーの既定メニューに設定 */
+/** 全ユーザーの既定メニューに設定 */
 async function setDefault(richMenuId) {
   const res = await fetch(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
     method: "POST",
@@ -87,7 +87,7 @@ export default async function handler(request) {
   if (!TOKEN) return new Response("CHANNEL_ACCESS_TOKEN missing", { status: 500 });
 
   try {
-    // 1) 新しい default 用メニュー（2URL + 下段 advisor_on へスイッチ）
+    // 新 default メニュー（上段URL×2、下段で advisor_on にスイッチ）
     const size = { width: 2500, height: 1686 };
     const topH = 800;
     const midX = Math.floor(size.width / 2);
@@ -108,7 +108,7 @@ export default async function handler(request) {
           bounds: { x: midX, y: 0, width: size.width - midX, height: topH },
           action: { type: "uri", label: "インターン求人一覧", uri: RICH_URL_RIGHT },
         },
-        // 下段 全幅：advisor_on へ切替（※AI面談）
+        // 下段：advisor_on へ切替（AI面談を起動）
         {
           bounds: { x: 0, y: topH, width: size.width, height: size.height - topH },
           action: { type: "richmenuswitch", richMenuAliasId: "advisor_on", data: "toggle=on" },
@@ -120,14 +120,14 @@ export default async function handler(request) {
     const richMenuId = created?.richMenuId;
     if (!richMenuId) throw new Error("no richMenuId");
 
-    // 2) 画像アップロード（public のファイルURLを参照）
+    // /public の画像を参照
     const publicImgUrl = new URL("/richmenu_v2.jpg", request.url).toString();
     await putImage(richMenuId, publicImgUrl, "image/jpeg");
 
-    // 3) alias: default を新メニューに差し替え
+    // alias: default を新メニューへ付け替え（旧に戻すのも alias 更新でOK）
     await setAlias("default", richMenuId);
 
-    // 4) ?apply=1 なら全体に反映
+    // ?apply=1 なら全ユーザーへ即適用
     const { searchParams } = new URL(request.url);
     const apply = searchParams.get("apply") === "1";
     if (apply) await setDefault(richMenuId);
