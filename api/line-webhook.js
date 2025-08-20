@@ -12,6 +12,10 @@ const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 const ADVISOR_RICHMENU_ID = process.env.ADVISOR_RICHMENU_ID ?? "";
 
+// v1 と同じ “エイリアスで切替” を使う
+const DEFAULT_ALIAS_ID = "default";
+const ADVISOR_ALIAS_ID = "advisor_on";
+
 // 署名検証（本番は true 推奨）
 const ENFORCE_SIGNATURE = true;
 
@@ -63,6 +67,20 @@ async function push(userId, text) {
   }
 }
 
+// ▼▼ v1 と同じ「ユーザーごとに alias を付け替える」関数を追加
+const linkAlias = async (userId, aliasId) => {
+  const url = `https://api.line.me/v2/bot/user/${userId}/richmenu/alias/${aliasId}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`linkAlias(${aliasId}) HTTP ${res.status} ${body}`);
+  }
+};
+// ▲▲
+
 export async function POST(request) {
   const raw = await request.text();
 
@@ -91,29 +109,57 @@ export async function POST(request) {
       const q = (ev.message?.text ?? "").trim();
       const userId = ev.source?.userId ?? null;
 
-      // ① ACK（軽い返信）
+      // ① まず軽い ACK
       await reply(ev.replyToken, "受け付けました。少しお待ちください…");
 
-      // 環境変数と呼び出し状況のログ（最小限）
+      // ログ（トークン末尾と AI モード確認に使う ID）
       console.log("ENV check", {
         ADVISOR_RICHMENU_ID,
         tokenTail: CHANNEL_ACCESS_TOKEN?.slice(-8),
         userId,
       });
 
-      // ② モード判定（ここが核心）
+      // ② 「AIアドバイザー」を v1 と同じ手順で ON（alias 付替）
+      const onWords = ["AIアドバイザー", "AI相談", "AI面談"];
+      const offWords = ["終了", "やめる", "メニュー"];
+
+      if (userId && onWords.includes(q)) {
+        try {
+          await linkAlias(userId, ADVISOR_ALIAS_ID); // ← v1 と同じ
+          await push(userId, "AIアドバイザーを開始します。質問をどうぞ。");
+        } catch (e) {
+          console.error(e);
+          await push(userId, "メニューの切り替えに失敗しました。時間をおいて再度お試しください。");
+        }
+        continue; // ON コマンドはここで終了
+      }
+
+      // ③ OFF（通常メニューへ戻す）
+      if (userId && offWords.includes(q)) {
+        try {
+          await linkAlias(userId, DEFAULT_ALIAS_ID); // ← v1 と同じ
+          await push(userId, "通常メニューに戻しました。");
+        } catch (e) {
+          console.error(e);
+          await push(userId, "メニューの切り替えに失敗しました。時間をおいて再度お試しください。");
+        }
+        continue; // OFF コマンドはここで終了
+      }
+
+      // ④ いま AI モードか判定（※v1 と同様、リンク中の richmenuId を参照）
       const advisorOn = userId
         ? await isAdvisorMode(userId, CHANNEL_ACCESS_TOKEN, ADVISOR_RICHMENU_ID)
         : false;
 
       if (!advisorOn) {
+        // まだ ON じゃないときの通常応答
         if (userId) {
           await push(userId, "AIアドバイザーを使うには、リッチメニューの『AI相談』をタップしてください。");
         }
         continue;
       }
 
-      // ③ AI 回答
+      // ⑤ AI回答（v1 のまま）
       try {
         const prompt = buildAdvisorPrompt(q);
         const r = await model.generateContent(prompt);
