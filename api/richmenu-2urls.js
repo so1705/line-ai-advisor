@@ -1,19 +1,20 @@
-// /pages/api/richmenu-2urls.js
-export const runtime = "edge";
+// /api/richmenu-2urls.js
+// ※ Vercel Serverless Functions (Node runtime) 向け。
+//    Edge用の Response.json は使いません。
 
 const LINE_BASE = "https://api.line.me";
 const TOKEN = process.env.CHANNEL_ACCESS_TOKEN || "";
 const RICH_URL_LEFT  = process.env.RICH_URL_LEFT  || "";
 const RICH_URL_RIGHT = process.env.RICH_URL_RIGHT || "";
 
-// fetch にタイムアウトを付ける小道具（20s）
+// fetch にタイムアウトを付与（20秒）
 async function fetchWithTimeout(url, opts = {}, ms = 20000) {
-  const c = new AbortController();
-  const t = setTimeout(() => c.abort(), ms);
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
   try {
-    return await fetch(url, { ...opts, signal: c.signal });
+    return await fetch(url, { ...opts, signal: controller.signal });
   } finally {
-    clearTimeout(t);
+    clearTimeout(id);
   }
 }
 
@@ -45,14 +46,15 @@ async function uploadImage(richMenuId, imgUrl, contentType = "image/jpeg") {
 }
 
 async function upsertAlias(aliasId, richMenuId) {
-  // 作成
+  // create
   let r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ richMenuAliasId: aliasId, richMenuId }),
   });
   if (r.ok) return;
-  // 更新
+
+  // update
   r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
@@ -62,7 +64,7 @@ async function upsertAlias(aliasId, richMenuId) {
   if (!r.ok) throw new Error(`alias upsert ${aliasId} ${r.status} ${text}`);
 }
 
-async function setDefault(richMenuId) {
+async function setDefaultForAll(richMenuId) {
   const r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}` },
@@ -71,28 +73,35 @@ async function setDefault(richMenuId) {
   if (!r.ok) throw new Error(`set default ${r.status} ${text}`);
 }
 
-export default async function handler(request) {
+// ★ ここが Node(Serverless) 形式のハンドラ
+export default async function handler(req, res) {
   const debug = [];
   try {
-    // 入力と環境チェック
+    if (req.method !== "POST" && req.method !== "GET") {
+      res.status(405).json({ ok: false, error: "method not allowed" });
+      return;
+    }
+
     if (!TOKEN) throw new Error("env: CHANNEL_ACCESS_TOKEN missing");
     if (!RICH_URL_LEFT || !RICH_URL_RIGHT) {
       throw new Error(`env: RICH_URL_LEFT/RIGHT missing (left=${!!RICH_URL_LEFT}, right=${!!RICH_URL_RIGHT})`);
     }
 
-    const url = new URL(request.url);
-    const step = url.searchParams.get("step") || "all"; // health / create / upload / alias / apply / all
+    const step = (req.query.step || "all").toString(); // health / create / upload / alias / apply / all
 
-    const imgUrl = new URL("/richmenu_v2.jpg", request.url).toString();
-    const imgHead = await fetchWithTimeout(imgUrl, { method: "GET", cache: "no-store" });
-    debug.push({ imgUrl, imgStatus: imgHead.status });
-    if (!imgHead.ok) throw new Error(`public image not found: ${imgUrl}`);
+    // 自分の公開URLから画像URLを組み立て（/public/richmenu_v2.jpg）
+    const origin = `https://${req.headers.host}`;
+    const imgUrl = `${origin}/richmenu_v2.jpg`;
+    const headRes = await fetchWithTimeout(imgUrl, { method: "GET", cache: "no-store" });
+    debug.push({ imgUrl, imgStatus: headRes.status });
+    if (!headRes.ok) throw new Error(`public image not found: ${imgUrl}`);
 
     if (step === "health") {
-      return Response.json({ ok: true, step, debug, tip: "env & image OK" });
+      res.status(200).json({ ok: true, step, debug, tip: "env & image OK" });
+      return;
     }
 
-    // 作成（上段URL×2 / 下段 advisor_on）
+    // 1) リッチメニュー作成（上段URL×2 / 下段 advisor_on へスイッチ）
     const size = { width: 2500, height: 1686 };
     const topH = 800, midX = Math.floor(size.width / 2);
     const payload = {
@@ -106,33 +115,33 @@ export default async function handler(request) {
 
     const created = await postJSON("/v2/bot/richmenu", payload);
     const richMenuId = created?.richMenuId;
-    if (!richMenuId) throw new Error("no richMenuId");
+    if (!richMenuId) throw new Error("no richMenuId from LINE API");
     debug.push({ step: "created", richMenuId });
 
-    if (step === "create") return Response.json({ ok: true, step, richMenuId, debug });
+    if (step === "create") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
 
-    // 画像アップロード
+    // 2) 画像アップロード（JPG）
     await uploadImage(richMenuId, imgUrl, "image/jpeg");
     debug.push({ step: "image_uploaded" });
 
-    if (step === "upload") return Response.json({ ok: true, step, richMenuId, debug });
+    if (step === "upload") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
 
-    // alias: default に割当
+    // 3) alias: default に割り当て（作成 or 更新）
     await upsertAlias("default", richMenuId);
     debug.push({ step: "alias_default_set" });
 
-    if (step === "alias") return Response.json({ ok: true, step, richMenuId, debug });
+    if (step === "alias") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
 
-    // ?apply=1 または step=apply で全体適用
-    const applyFlag = url.searchParams.get("apply") === "1" || step === "apply" || step === "all";
-    if (applyFlag) {
-      await setDefault(richMenuId);
+    // 4) ?apply=1 か step=apply/all で全体反映
+    const apply = req.query.apply === "1" || step === "apply" || step === "all";
+    if (apply) {
+      await setDefaultForAll(richMenuId);
       debug.push({ step: "applied_all" });
     }
 
-    return Response.json({ ok: true, step, richMenuId, debug });
+    res.status(200).json({ ok: true, step, richMenuId, applied: apply, debug });
   } catch (e) {
     debug.push({ error: String(e?.message || e) });
-    return Response.json({ ok: false, debug }, { status: 500 });
+    res.status(500).json({ ok: false, debug });
   }
 }
