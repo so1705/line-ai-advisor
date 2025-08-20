@@ -136,7 +136,7 @@ export async function POST(request) {
       try {
         const id = await resolveIdFromAlias("advisor_on");
         await linkById(userId, id);
-        await push(userId, "AIアドバイザーを開始します。質問をどうぞ。");
+        await push(userId, "AIアドバイザーを開始します。質問をどうぞ！");
       } catch (e) {
         console.error(e);
         await push(userId, "メニューの切り替えに失敗しました。時間をおいて再度お試しください。");
