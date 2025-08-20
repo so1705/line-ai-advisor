@@ -6,9 +6,19 @@ const TOKEN = process.env.CHANNEL_ACCESS_TOKEN || "";
 const RICH_URL_LEFT  = process.env.RICH_URL_LEFT  || "";
 const RICH_URL_RIGHT = process.env.RICH_URL_RIGHT || "";
 
-/** helper */
-async function fetchJSON(path, json) {
-  const res = await fetch(`${LINE_BASE}${path}`, {
+// fetch にタイムアウトを付ける小道具（20s）
+async function fetchWithTimeout(url, opts = {}, ms = 20000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: c.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function postJSON(path, json) {
+  const res = await fetchWithTimeout(`${LINE_BASE}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -22,28 +32,28 @@ async function fetchJSON(path, json) {
 }
 
 async function uploadImage(richMenuId, imgUrl, contentType = "image/jpeg") {
-  const imgRes = await fetch(imgUrl, { cache: "no-store" });
+  const imgRes = await fetchWithTimeout(imgUrl, { cache: "no-store" });
   if (!imgRes.ok) throw new Error(`image fetch ${imgRes.status} ${imgUrl}`);
-  const blob = await imgRes.arrayBuffer();
-  const res = await fetch(`${LINE_BASE}/v2/bot/richmenu/${richMenuId}/content`, {
+  const body = await imgRes.arrayBuffer();
+  const res = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/${richMenuId}/content`, {
     method: "POST",
     headers: { "Content-Type": contentType, Authorization: `Bearer ${TOKEN}` },
-    body: blob,
+    body,
   });
   const text = await res.text().catch(() => "");
   if (!res.ok) throw new Error(`image upload ${res.status} ${text}`);
 }
 
 async function upsertAlias(aliasId, richMenuId) {
-  // create
-  let r = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias`, {
+  // 作成
+  let r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ richMenuAliasId: aliasId, richMenuId }),
   });
   if (r.ok) return;
-  // update
-  r = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
+  // 更新
+  r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ richMenuId }),
@@ -53,7 +63,7 @@ async function upsertAlias(aliasId, richMenuId) {
 }
 
 async function setDefault(richMenuId) {
-  const r = await fetch(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
+  const r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
@@ -64,27 +74,29 @@ async function setDefault(richMenuId) {
 export default async function handler(request) {
   const debug = [];
   try {
-    // 0) 事前チェック
-    if (!TOKEN) throw new Error("env: CHANNEL_ACCESS_TOKEN is empty");
+    // 入力と環境チェック
+    if (!TOKEN) throw new Error("env: CHANNEL_ACCESS_TOKEN missing");
     if (!RICH_URL_LEFT || !RICH_URL_RIGHT) {
       throw new Error(`env: RICH_URL_LEFT/RIGHT missing (left=${!!RICH_URL_LEFT}, right=${!!RICH_URL_RIGHT})`);
     }
 
+    const url = new URL(request.url);
+    const step = url.searchParams.get("step") || "all"; // health / create / upload / alias / apply / all
+
     const imgUrl = new URL("/richmenu_v2.jpg", request.url).toString();
-    const headRes = await fetch(imgUrl, { method: "GET", cache: "no-store" });
-    debug.push({ imgUrl, imgStatus: headRes.status });
-    if (!headRes.ok) throw new Error(`public image not found: ${imgUrl}`);
+    const imgHead = await fetchWithTimeout(imgUrl, { method: "GET", cache: "no-store" });
+    debug.push({ imgUrl, imgStatus: imgHead.status });
+    if (!imgHead.ok) throw new Error(`public image not found: ${imgUrl}`);
 
-    // 1) リッチメニュー作成（上段URL×2／下段 advisor_on）
+    if (step === "health") {
+      return Response.json({ ok: true, step, debug, tip: "env & image OK" });
+    }
+
+    // 作成（上段URL×2 / 下段 advisor_on）
     const size = { width: 2500, height: 1686 };
-    const topH = 800;
-    const midX = Math.floor(size.width / 2);
-
+    const topH = 800, midX = Math.floor(size.width / 2);
     const payload = {
-      size,
-      selected: true,
-      name: "default_v2",
-      chatBarText: "メニュー",
+      size, selected: true, name: "default_v2", chatBarText: "メニュー",
       areas: [
         { bounds: { x: 0, y: 0, width: midX, height: topH }, action: { type: "uri", label: "会員登録", uri: RICH_URL_LEFT } },
         { bounds: { x: midX, y: 0, width: size.width - midX, height: topH }, action: { type: "uri", label: "インターン求人一覧", uri: RICH_URL_RIGHT } },
@@ -92,27 +104,35 @@ export default async function handler(request) {
       ],
     };
 
-    const created = await fetchJSON("/v2/bot/richmenu", payload);
+    const created = await postJSON("/v2/bot/richmenu", payload);
     const richMenuId = created?.richMenuId;
-    if (!richMenuId) throw new Error("no richMenuId from LINE API");
+    if (!richMenuId) throw new Error("no richMenuId");
     debug.push({ step: "created", richMenuId });
 
-    // 2) 画像アップロード（jpg）
+    if (step === "create") return Response.json({ ok: true, step, richMenuId, debug });
+
+    // 画像アップロード
     await uploadImage(richMenuId, imgUrl, "image/jpeg");
     debug.push({ step: "image_uploaded" });
 
-    // 3) alias: default に差し替え
+    if (step === "upload") return Response.json({ ok: true, step, richMenuId, debug });
+
+    // alias: default に割当
     await upsertAlias("default", richMenuId);
     debug.push({ step: "alias_default_set" });
 
-    // 4) ?apply=1 なら全体適用
-    const apply = new URL(request.url).searchParams.get("apply") === "1";
-    if (apply) { await setDefault(richMenuId); debug.push({ step: "applied_all" }); }
+    if (step === "alias") return Response.json({ ok: true, step, richMenuId, debug });
 
-    return Response.json({ ok: true, richMenuId, applied: apply, debug });
+    // ?apply=1 または step=apply で全体適用
+    const applyFlag = url.searchParams.get("apply") === "1" || step === "apply" || step === "all";
+    if (applyFlag) {
+      await setDefault(richMenuId);
+      debug.push({ step: "applied_all" });
+    }
+
+    return Response.json({ ok: true, step, richMenuId, debug });
   } catch (e) {
     debug.push({ error: String(e?.message || e) });
-    // エラー内容をそのまま返す（原因特定用）
     return Response.json({ ok: false, debug }, { status: 500 });
   }
 }
