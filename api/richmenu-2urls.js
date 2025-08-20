@@ -2,12 +2,12 @@
 export const runtime = "edge";
 
 const LINE_BASE = "https://api.line.me";
-const TOKEN = process.env.CHANNEL_ACCESS_TOKEN ?? "";
-const RICH_URL_LEFT  = process.env.RICH_URL_LEFT  ?? "https://example.com/signup";
-const RICH_URL_RIGHT = process.env.RICH_URL_RIGHT ?? "https://example.com/jobs";
+const TOKEN = process.env.CHANNEL_ACCESS_TOKEN || "";
+const RICH_URL_LEFT  = process.env.RICH_URL_LEFT  || "";
+const RICH_URL_RIGHT = process.env.RICH_URL_RIGHT || "";
 
-/** JSON POST */
-async function postJSON(path, json) {
+/** helper */
+async function fetchJSON(path, json) {
   const res = await fetch(`${LINE_BASE}${path}`, {
     method: "POST",
     headers: {
@@ -16,78 +16,66 @@ async function postJSON(path, json) {
     },
     body: JSON.stringify(json),
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${path} ${res.status} ${body}`);
-  }
-  return res.json().catch(() => ({}));
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(`${path} ${res.status} ${text}`);
+  try { return JSON.parse(text); } catch { return {}; }
 }
 
-/** 画像アップロード（/public の実URLから Edge で転送） */
-async function putImage(richMenuId, imgUrl, contentType = "image/jpeg") {
-  const imgRes = await fetch(imgUrl);
-  if (!imgRes.ok) throw new Error(`fetch image failed ${imgRes.status}`);
+async function uploadImage(richMenuId, imgUrl, contentType = "image/jpeg") {
+  const imgRes = await fetch(imgUrl, { cache: "no-store" });
+  if (!imgRes.ok) throw new Error(`image fetch ${imgRes.status} ${imgUrl}`);
   const blob = await imgRes.arrayBuffer();
   const res = await fetch(`${LINE_BASE}/v2/bot/richmenu/${richMenuId}/content`, {
     method: "POST",
-    headers: {
-      "Content-Type": contentType,
-      Authorization: `Bearer ${TOKEN}`,
-    },
+    headers: { "Content-Type": contentType, Authorization: `Bearer ${TOKEN}` },
     body: blob,
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`upload image ${res.status} ${body}`);
-  }
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(`image upload ${res.status} ${text}`);
 }
 
-/** alias を richMenuId に割当（create or update） */
-async function setAlias(aliasId, richMenuId) {
-  // 作成
-  let res = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias`, {
+async function upsertAlias(aliasId, richMenuId) {
+  // create
+  let r = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ richMenuAliasId: aliasId, richMenuId }),
   });
-  if (res.ok) return true;
-
-  // 既存なら更新
-  res = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
+  if (r.ok) return;
+  // update
+  r = await fetch(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ richMenuId }),
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`alias update ${res.status} ${body}`);
-  }
-  return true;
+  const text = await r.text().catch(() => "");
+  if (!r.ok) throw new Error(`alias upsert ${aliasId} ${r.status} ${text}`);
 }
 
-/** 全ユーザーの既定メニューに設定 */
 async function setDefault(richMenuId) {
-  const res = await fetch(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
+  const r = await fetch(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`set default ${res.status} ${body}`);
-  }
+  const text = await r.text().catch(() => "");
+  if (!r.ok) throw new Error(`set default ${r.status} ${text}`);
 }
 
 export default async function handler(request) {
-  if (!TOKEN) return new Response("CHANNEL_ACCESS_TOKEN missing", { status: 500 });
-
+  const debug = [];
   try {
-    // 新 default メニュー（上段URL×2、下段で advisor_on にスイッチ）
+    // 0) 事前チェック
+    if (!TOKEN) throw new Error("env: CHANNEL_ACCESS_TOKEN is empty");
+    if (!RICH_URL_LEFT || !RICH_URL_RIGHT) {
+      throw new Error(`env: RICH_URL_LEFT/RIGHT missing (left=${!!RICH_URL_LEFT}, right=${!!RICH_URL_RIGHT})`);
+    }
+
+    const imgUrl = new URL("/richmenu_v2.jpg", request.url).toString();
+    const headRes = await fetch(imgUrl, { method: "GET", cache: "no-store" });
+    debug.push({ imgUrl, imgStatus: headRes.status });
+    if (!headRes.ok) throw new Error(`public image not found: ${imgUrl}`);
+
+    // 1) リッチメニュー作成（上段URL×2／下段 advisor_on）
     const size = { width: 2500, height: 1686 };
     const topH = 800;
     const midX = Math.floor(size.width / 2);
@@ -98,43 +86,33 @@ export default async function handler(request) {
       name: "default_v2",
       chatBarText: "メニュー",
       areas: [
-        // 上段 左：会員登録
-        {
-          bounds: { x: 0, y: 0, width: midX, height: topH },
-          action: { type: "uri", label: "会員登録", uri: RICH_URL_LEFT },
-        },
-        // 上段 右：インターン求人一覧
-        {
-          bounds: { x: midX, y: 0, width: size.width - midX, height: topH },
-          action: { type: "uri", label: "インターン求人一覧", uri: RICH_URL_RIGHT },
-        },
-        // 下段：advisor_on へ切替（AI面談を起動）
-        {
-          bounds: { x: 0, y: topH, width: size.width, height: size.height - topH },
-          action: { type: "richmenuswitch", richMenuAliasId: "advisor_on", data: "toggle=on" },
-        },
+        { bounds: { x: 0, y: 0, width: midX, height: topH }, action: { type: "uri", label: "会員登録", uri: RICH_URL_LEFT } },
+        { bounds: { x: midX, y: 0, width: size.width - midX, height: topH }, action: { type: "uri", label: "インターン求人一覧", uri: RICH_URL_RIGHT } },
+        { bounds: { x: 0, y: topH, width: size.width, height: size.height - topH }, action: { type: "richmenuswitch", richMenuAliasId: "advisor_on", data: "toggle=on" } },
       ],
     };
 
-    const created = await postJSON("/v2/bot/richmenu", payload);
+    const created = await fetchJSON("/v2/bot/richmenu", payload);
     const richMenuId = created?.richMenuId;
-    if (!richMenuId) throw new Error("no richMenuId");
+    if (!richMenuId) throw new Error("no richMenuId from LINE API");
+    debug.push({ step: "created", richMenuId });
 
-    // /public の画像を参照
-    const publicImgUrl = new URL("/richmenu_v2.jpg", request.url).toString();
-    await putImage(richMenuId, publicImgUrl, "image/jpeg");
+    // 2) 画像アップロード（jpg）
+    await uploadImage(richMenuId, imgUrl, "image/jpeg");
+    debug.push({ step: "image_uploaded" });
 
-    // alias: default を新メニューへ付け替え（旧に戻すのも alias 更新でOK）
-    await setAlias("default", richMenuId);
+    // 3) alias: default に差し替え
+    await upsertAlias("default", richMenuId);
+    debug.push({ step: "alias_default_set" });
 
-    // ?apply=1 なら全ユーザーへ即適用
-    const { searchParams } = new URL(request.url);
-    const apply = searchParams.get("apply") === "1";
-    if (apply) await setDefault(richMenuId);
+    // 4) ?apply=1 なら全体適用
+    const apply = new URL(request.url).searchParams.get("apply") === "1";
+    if (apply) { await setDefault(richMenuId); debug.push({ step: "applied_all" }); }
 
-    return Response.json({ ok: true, richMenuId, alias: "default", applied: apply });
+    return Response.json({ ok: true, richMenuId, applied: apply, debug });
   } catch (e) {
-    console.error(e);
-    return new Response(String(e?.message ?? "error"), { status: 500 });
+    debug.push({ error: String(e?.message || e) });
+    // エラー内容をそのまま返す（原因特定用）
+    return Response.json({ ok: false, debug }, { status: 500 });
   }
 }
