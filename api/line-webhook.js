@@ -12,7 +12,7 @@ const CHANNEL_ACCESS_TOKEN =
   process.env.CHANNEL_ACCESS_TOKEN ?? process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 
-// リッチメニューID（alias未設定時の直指定用。設定されていれば使う）
+// リッチメニューID（未設定でも動くよう alias で解決）
 const ADVISOR_RICHMENU_ID = process.env.ADVISOR_RICHMENU_ID ?? "";
 const DEFAULT_RICHMENU_ID = process.env.DEFAULT_RICHMENU_ID ?? "";
 
@@ -105,7 +105,7 @@ export async function POST(request) {
   for (const ev of events) {
     const userId = ev.source?.userId ?? null;
 
-    // 1) リッチメニューの postback だけでモード切替
+    // --- 1) リッチメニュー postback でモード切替 ---
     if (ev.type === "postback" && userId) {
       const data = ev.postback?.data || "";
       try {
@@ -125,29 +125,48 @@ export async function POST(request) {
       continue;
     }
 
-    // 2) テキストメッセージ以外は無視
+    // --- 2) テキスト以外は無視 ---
     if (ev.type !== "message" || ev.message?.type !== "text") continue;
 
     const q = (ev.message?.text ?? "").trim();
 
-    // 3) 明示的な「終了」だけ通常メニューへ戻す（任意）
-    if (userId && ["終了", "やめる", "メニュー"].includes(q)) {
+    // --- 3) （保険）手打ちでも切替できるように ---
+    const onWords = ["AIアドバイザー"]; // ← 不要なら空配列に
+    const offWords = ["終了", "やめる", "メニュー"];
+
+    if (userId && onWords.includes(q)) {
+      try {
+        const id = await resolveIdFromAlias("advisor_on");
+        await linkById(userId, id);
+        await push(userId, "AIアドバイザーを開始します。質問をどうぞ！");
+      } catch (e) {
+        console.error(e);
+        await push(userId, "メニューの切り替えに失敗しました。時間をおいて再度お試しください。");
+      }
+      continue;
+    }
+
+    if (userId && offWords.includes(q)) {
       try {
         const id = await resolveIdFromAlias("default");
         await linkById(userId, id);
         await push(userId, "通常メニューに戻しました。");
       } catch (e) {
         console.error(e);
+        await push(userId, "メニューの切り替えに失敗しました。時間をおいて再度お試しください。");
       }
       continue;
     }
 
-    // 4) いま advisor 中か？ 非AIモードなら完全スルー（誘導もしない）
+    // --- 4) AIモード中か？（env 未設定でも alias 解決して判定）---
     const linked = userId ? await getLinkedRichMenuId(userId) : null;
-    const advisorOn = !!linked && (linked === ADVISOR_RICHMENU_ID);
+    const advisorId = ADVISOR_RICHMENU_ID || (await resolveIdFromAlias("advisor_on").catch(() => ""));
+    const advisorOn = !!linked && !!advisorId && linked === advisorId;
+
+    // 非AIモード時は完全スルー（誘導しない）
     if (!advisorOn) continue;
 
-    // 5) AIモード中だけ応答
+    // --- 5) AIモード中のみ応答 ---
     try {
       const def = selectPrompt(q, { abBucket: PROMPT_AB_BUCKET });
       const system = buildSystemPrompt(def, { text: q, strict: PROMPT_STRICT });
