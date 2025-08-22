@@ -1,7 +1,7 @@
 {
   "size": { "width": 2500, "height": 1686 },
   "selected": true,
-  "name": "default_v2_message",
+  "name": "default_v2_postback",
   "chatBarText": "メニュー",
   "areas": [
     {
@@ -14,8 +14,7 @@
     },
     {
       "bounds": { "x": 0, "y": 800, "width": 2500, "height": 886 },
-      "action": { "type": "message", "label": "AIアドバイザー", "text": "AIアドバイザー" }
+      "action": { "type": "postback", "label": "AIアドバイザー開始", "data": "mode=advisor_on" }
     }
   ]
 }
-
