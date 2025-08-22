@@ -1,5 +1,5 @@
 // /prompts/advisor.js
-// 返答の方針をここで管理。systemOverride があればそれを優先。
+// 既存互換：systemOverride があればそれを優先して prompt を生成
 
 export function buildAdvisorPrompt(userText, systemOverride = '') {
   const base = systemOverride || [
@@ -10,5 +10,11 @@ export function buildAdvisorPrompt(userText, systemOverride = '') {
     "・日本語、敬体。"
   ].join("\n");
 
-  return [base, "", `ユーザーの相談: ${userText}`].join("\n");
+  // 軽い“形のテンプレ”を差し込んで、出力のムラを抑える
+  const softTemplate = [
+    "[出力の基本形] ①結論 ②理由 ③次の一歩",
+    ""
+  ].join("\n");
+
+  return [base, softTemplate, `ユーザーの相談: ${userText}`].join("\n");
 }
