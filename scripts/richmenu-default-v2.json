@@ -6,27 +6,16 @@
   "areas": [
     {
       "bounds": { "x": 0, "y": 0, "width": 1250, "height": 800 },
-      "action": {
-        "type": "uri",
-        "label": "会員登録",
-        "uri": "https://docs.google.com/forms/d/e/1FAIpQLSeVAxpAKaIvARwsVu9hj7tgZw28IIZM2QVDYhxVke-BGVba4A/viewform?usp=sharing&ouid=108498816647643012898"
-      }
+      "action": { "type": "uri", "label": "会員登録", "uri": "https://docs.google.com/forms/d/e/1FAIpQLSeVAxpAKaIvARwsVu9hj7tgZw28IIZM2QVDYhxVke-BGVba4A/viewform?usp=sharing&ouid=108498816647643012898" }
     },
     {
       "bounds": { "x": 1250, "y": 0, "width": 1250, "height": 800 },
-      "action": {
-        "type": "uri",
-        "label": "インターン求人一覧",
-        "uri": "https://spot-spear-21a.notion.site/Flags-24147df3afd680e8ab85f438660c7301?source=copy_link"
-      }
+      "action": { "type": "uri", "label": "インターン求人一覧", "uri": "https://spot-spear-21a.notion.site/Flags-24147df3afd680e8ab85f438660c7301?source=copy_link" }
     },
     {
       "bounds": { "x": 0, "y": 800, "width": 2500, "height": 886 },
-      "action": {
-        "type": "message",
-        "label": "AIアドバイザーを開始",
-        "text": "AIアドバイザーON"
-      }
+      "action": { "type": "message", "label": "AIアドバイザー", "text": "AIアドバイザー" }
     }
   ]
 }
+
