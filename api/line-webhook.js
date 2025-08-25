@@ -108,19 +108,12 @@ export async function POST(request) {
     // --- 1) リッチメニュー postback でモード切替 ---
     if (ev.type === "postback" && userId) {
       const data = ev.postback?.data || "";
-
-      // ← ここだけ強化：mode=.. と toggle=on/off の両方を受ける
-      const toAdvisor =
-        data.includes("mode=advisor_on") || data.includes("toggle=on");
-      const toDefault =
-        data.includes("mode=default") || data.includes("toggle=off");
-
       try {
-        if (toAdvisor) {
+        if (data.includes("mode=advisor_on")) {
           const id = await resolveIdFromAlias("advisor_on");
           await linkById(userId, id);
           await push(userId, "AIアドバイザーを開始します。質問をどうぞ！");
-        } else if (toDefault) {
+        } else if (data.includes("mode=default")) {
           const id = await resolveIdFromAlias("default");
           await linkById(userId, id);
           await push(userId, "通常メニューに戻しました。");
@@ -138,7 +131,7 @@ export async function POST(request) {
     const q = (ev.message?.text ?? "").trim();
 
     // --- 3) （保険）手打ちでも切替できるように ---
-    const onWords = ["AIアドバイザー"]; // 不要なら空配列に
+    const onWords = ["AIアドバイザー"]; // ← 不要なら空配列に
     const offWords = ["終了", "やめる", "メニュー"];
 
     if (userId && onWords.includes(q)) {
@@ -167,11 +160,10 @@ export async function POST(request) {
 
     // --- 4) AIモード中か？（env 未設定でも alias 解決して判定）---
     const linked = userId ? await getLinkedRichMenuId(userId) : null;
-    const advisorId =
-      ADVISOR_RICHMENU_ID || (await resolveIdFromAlias("advisor_on").catch(() => ""));
+    const advisorId = ADVISOR_RICHMENU_ID || (await resolveIdFromAlias("advisor_on").catch(() => ""));
     const advisorOn = !!linked && !!advisorId && linked === advisorId;
 
-    // 非AIモード時は完全スルー
+    // 非AIモード時は完全スルー（誘導しない）
     if (!advisorOn) continue;
 
     // --- 5) AIモード中のみ応答 ---
@@ -191,6 +183,3 @@ export async function POST(request) {
 
   return new Response("ok", { status: 200 });
 }
-git add .
-git commit -m "first deploy"
-git push origin main
