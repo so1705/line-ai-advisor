@@ -1,0 +1,24 @@
+{
+  "size": { "width": 2500, "height": 1686 },
+  "selected": true,
+  "name": "default_v3",
+  "chatBarText": "メニュー",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 2500, "height": 700 },
+      "action": { "type": "richmenuswitch", "richMenuAliasId": "advisor_on", "data": "mode=advisor_on" }
+    },
+    {
+      "bounds": { "x": 0, "y": 700, "width": 833, "height": 986 },
+      "action": { "type": "uri", "label": "会員登録", "uri": "https://forms.gle/NUayyAKG1onx9fF96" }
+    },
+    {
+      "bounds": { "x": 833, "y": 700, "width": 834, "height": 986 },
+      "action": { "type": "uri", "label": "求人情報", "uri": "https://spot-spear-21a.notion.site/Flags-24147df3afd680e8ab85f438660c7301" }
+    },
+    {
+      "bounds": { "x": 1667, "y": 700, "width": 833, "height": 986 },
+      "action": { "type": "uri", "label": "最新情報", "uri": "https://note.com/flags_intern" }
+    }
+  ]
+}
