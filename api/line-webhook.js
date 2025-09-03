@@ -12,9 +12,9 @@ const CHANNEL_ACCESS_TOKEN =
   process.env.CHANNEL_ACCESS_TOKEN ?? process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 
-// リッチメニューID（未設定でも動くよう alias で解決）
-const ADVISOR_RICHMENU_ID = process.env.ADVISOR_RICHMENU_ID ?? "";
-const DEFAULT_RICHMENU_ID = process.env.DEFAULT_RICHMENU_ID ?? "";
+// （重要）固定IDは使わない：常に alias で解決する
+const ADVISOR_RICHMENU_ID = "";
+const DEFAULT_RICHMENU_ID = "";
 
 // 署名検証
 const ENFORCE_SIGNATURE = true;
@@ -59,9 +59,7 @@ async function push(userId, text) {
 }
 
 async function resolveIdFromAlias(aliasId) {
-  if (aliasId === "advisor_on" && ADVISOR_RICHMENU_ID) return ADVISOR_RICHMENU_ID;
-  if (aliasId === "default" && DEFAULT_RICHMENU_ID) return DEFAULT_RICHMENU_ID;
-
+  // 常に alias を参照して ID を解決
   const url = "https://api.line.me/v2/bot/richmenu/alias/list";
   const res = await fetch(url, { headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` } });
   if (!res.ok) throw new Error(`alias/list HTTP ${res.status}`);
@@ -131,7 +129,7 @@ export async function POST(request) {
     const q = (ev.message?.text ?? "").trim();
 
     // --- 3) （保険）手打ちでも切替できるように ---
-    const onWords = ["AIアドバイザー"]; // ← 不要なら空配列に
+    const onWords = ["AIアドバイザー"];
     const offWords = ["終了", "やめる", "メニュー"];
 
     if (userId && onWords.includes(q)) {
@@ -158,12 +156,11 @@ export async function POST(request) {
       continue;
     }
 
-    // --- 4) AIモード中か？（env 未設定でも alias 解決して判定）---
+    // --- 4) AIモード中か？（alias 解決して判定）---
     const linked = userId ? await getLinkedRichMenuId(userId) : null;
-    const advisorId = ADVISOR_RICHMENU_ID || (await resolveIdFromAlias("advisor_on").catch(() => ""));
+    const advisorId = await resolveIdFromAlias("advisor_on").catch(() => "");
     const advisorOn = !!linked && !!advisorId && linked === advisorId;
 
-    // 非AIモード時は完全スルー（誘導しない）
     if (!advisorOn) continue;
 
     // --- 5) AIモード中のみ応答 ---

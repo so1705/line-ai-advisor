@@ -1,30 +1,25 @@
 // /api/richmenu-2urls.js
-// ※ Vercel Serverless Functions (Node runtime) 向け。
-//    Edge用の Response.json は使いません。
+// Vercel Serverless Functions (Node runtime)
 
 const LINE_BASE = "https://api.line.me";
 const TOKEN = process.env.CHANNEL_ACCESS_TOKEN || "";
+
+// 下3リンク用URL（左・中・右）
 const RICH_URL_LEFT  = process.env.RICH_URL_LEFT  || "";
+const RICH_URL_MID   = process.env.RICH_URL_MID   || ""; // 新規
 const RICH_URL_RIGHT = process.env.RICH_URL_RIGHT || "";
 
-// fetch にタイムアウトを付与（20秒）
 async function fetchWithTimeout(url, opts = {}, ms = 20000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
+  try { return await fetch(url, { ...opts, signal: controller.signal }); }
+  finally { clearTimeout(id); }
 }
 
 async function postJSON(path, json) {
   const res = await fetchWithTimeout(`${LINE_BASE}${path}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify(json),
   });
   const text = await res.text().catch(() => "");
@@ -32,7 +27,7 @@ async function postJSON(path, json) {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
-async function uploadImage(richMenuId, imgUrl, contentType = "image/jpeg") {
+async function uploadImage(richMenuId, imgUrl, contentType = "image/png") {
   const imgRes = await fetchWithTimeout(imgUrl, { cache: "no-store" });
   if (!imgRes.ok) throw new Error(`image fetch ${imgRes.status} ${imgUrl}`);
   const body = await imgRes.arrayBuffer();
@@ -46,7 +41,6 @@ async function uploadImage(richMenuId, imgUrl, contentType = "image/jpeg") {
 }
 
 async function upsertAlias(aliasId, richMenuId) {
-  // create
   let r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
@@ -54,7 +48,6 @@ async function upsertAlias(aliasId, richMenuId) {
   });
   if (r.ok) return;
 
-  // update
   r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/richmenu/alias/${aliasId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
@@ -66,14 +59,49 @@ async function upsertAlias(aliasId, richMenuId) {
 
 async function setDefaultForAll(richMenuId) {
   const r = await fetchWithTimeout(`${LINE_BASE}/v2/bot/user/all/richmenu/${richMenuId}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TOKEN}` },
+    method: "POST", headers: { Authorization: `Bearer ${TOKEN}` },
   });
   const text = await r.text().catch(() => "");
   if (!r.ok) throw new Error(`set default ${r.status} ${text}`);
 }
 
-// ★ ここが Node(Serverless) 形式のハンドラ
+// JSON組み立て（上：スイッチ / 下：3分割URL）
+function buildPayload(kind = "default") {
+  const size = { width: 2500, height: 1686 };
+  const topH = 700;
+  const colW = Math.floor(size.width / 3); // 833
+  const midW = size.width - (colW * 2);    // 834
+
+  const commonBottom = [
+    { bounds: { x: 0, y: topH, width: colW, height: size.height - topH },
+      action: { type: "uri", label: "会員登録", uri: RICH_URL_LEFT } },
+    { bounds: { x: colW, y: topH, width: midW, height: size.height - topH },
+      action: { type: "uri", label: "求人情報", uri: RICH_URL_MID || RICH_URL_RIGHT } },
+    { bounds: { x: colW + midW, y: topH, width: colW, height: size.height - topH },
+      action: { type: "uri", label: "最新情報", uri: RICH_URL_RIGHT } },
+  ];
+
+  if (kind === "default") {
+    return {
+      size, selected: true, name: "default_v3", chatBarText: "メニュー",
+      areas: [
+        { bounds: { x: 0, y: 0, width: size.width, height: topH },
+          action: { type: "richmenuswitch", richMenuAliasId: "advisor_on", data: "mode=advisor_on" } },
+        ...commonBottom,
+      ],
+    };
+  }
+  return {
+    size, selected: false, name: "advisor_v3", chatBarText: "AIアドバイザー中",
+    areas: [
+      { bounds: { x: 0, y: 0, width: size.width, height: topH },
+        action: { type: "richmenuswitch", richMenuAliasId: "default", data: "mode=default" } },
+      ...commonBottom,
+    ],
+  };
+}
+
+// handler
 export default async function handler(req, res) {
   const debug = [];
   try {
@@ -81,67 +109,61 @@ export default async function handler(req, res) {
       res.status(405).json({ ok: false, error: "method not allowed" });
       return;
     }
-
     if (!TOKEN) throw new Error("env: CHANNEL_ACCESS_TOKEN missing");
     if (!RICH_URL_LEFT || !RICH_URL_RIGHT) {
-      throw new Error(`env: RICH_URL_LEFT/RIGHT missing (left=${!!RICH_URL_LEFT}, right=${!!RICH_URL_RIGHT})`);
+      throw new Error(`env: URL missing (left=${!!RICH_URL_LEFT}, mid=${!!RICH_URL_MID}, right=${!!RICH_URL_RIGHT})`);
     }
 
-    const step = (req.query.step || "all").toString(); // health / create / upload / alias / apply / all
+    const step = (req.query.step || "all").toString();   // health/create/upload/alias/apply/all
+    const menu = (req.query.menu || "both").toString();  // default/advisor/both
 
-    // 自分の公開URLから画像URLを組み立て（/public/richmenu_v2.jpg）
+    // 画像URL（/public/default.png / /public/advisor.png）
     const origin = `https://${req.headers.host}`;
-    const imgUrl = `${origin}/richmenu_v2.jpg`;
-    const headRes = await fetchWithTimeout(imgUrl, { method: "GET", cache: "no-store" });
-    debug.push({ imgUrl, imgStatus: headRes.status });
-    if (!headRes.ok) throw new Error(`public image not found: ${imgUrl}`);
+    const imgDefault = `${origin}/default.png`;
+    const imgAdvisor = `${origin}/advisor.png`;
+
+    // 画像存在チェック
+    const stDef = (await fetchWithTimeout(imgDefault, { method: "GET", cache: "no-store" })).status;
+    const stAdv = (await fetchWithTimeout(imgAdvisor, { method: "GET", cache: "no-store" })).status;
+    debug.push({ imgDefault, stDef, imgAdvisor, stAdv });
+    if (!(stDef >= 200 && stDef < 400)) throw new Error(`public image not found: ${imgDefault}`);
+    if (!(stAdv >= 200 && stAdv < 400)) throw new Error(`public image not found: ${imgAdvisor}`);
 
     if (step === "health") {
-      res.status(200).json({ ok: true, step, debug, tip: "env & image OK" });
+      res.status(200).json({ ok: true, step, menu, debug, tip: "env & image OK" });
       return;
     }
 
-    // 1) リッチメニュー作成（上段URL×2 / 下段 advisor_on へスイッチ）
-    const size = { width: 2500, height: 1686 };
-    const topH = 800, midX = Math.floor(size.width / 2);
-    const payload = {
-      size, selected: true, name: "default_v2", chatBarText: "メニュー",
-      areas: [
-        { bounds: { x: 0, y: 0, width: midX, height: topH }, action: { type: "uri", label: "会員登録", uri: RICH_URL_LEFT } },
-        { bounds: { x: midX, y: 0, width: size.width - midX, height: topH }, action: { type: "uri", label: "インターン求人一覧", uri: RICH_URL_RIGHT } },
-        { bounds: { x: 0, y: topH, width: size.width, height: size.height - topH }, action: { type: "richmenuswitch", richMenuAliasId: "advisor_on", data: "toggle=on" } },
-      ],
-    };
+    const results = {};
 
-    const created = await postJSON("/v2/bot/richmenu", payload);
-    const richMenuId = created?.richMenuId;
-    if (!richMenuId) throw new Error("no richMenuId from LINE API");
-    debug.push({ step: "created", richMenuId });
-
-    if (step === "create") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
-
-    // 2) 画像アップロード（JPG）
-    await uploadImage(richMenuId, imgUrl, "image/jpeg");
-    debug.push({ step: "image_uploaded" });
-
-    if (step === "upload") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
-
-    // 3) alias: default に割り当て（作成 or 更新）
-    await upsertAlias("default", richMenuId);
-    debug.push({ step: "alias_default_set" });
-
-    if (step === "alias") { res.status(200).json({ ok: true, step, richMenuId, debug }); return; }
-
-    // 4) ?apply=1 か step=apply/all で全体反映
-    const apply = req.query.apply === "1" || step === "apply" || step === "all";
-    if (apply) {
-      await setDefaultForAll(richMenuId);
-      debug.push({ step: "applied_all" });
+    // default
+    if (menu === "default" || menu === "both") {
+      const createdD = await postJSON("/v2/bot/richmenu", buildPayload("default"));
+      const defId = createdD?.richMenuId; if (!defId) throw new Error("no richMenuId (default)");
+      if (step === "create") { res.status(200).json({ ok: true, step, defId, debug }); return; }
+      await uploadImage(defId, imgDefault, "image/png");
+      if (step === "upload") { res.status(200).json({ ok: true, step, defId, debug }); return; }
+      await upsertAlias("default", defId);
+      results.defId = defId;
     }
 
-    res.status(200).json({ ok: true, step, richMenuId, applied: apply, debug });
+    // advisor_on
+    if (menu === "advisor" || menu === "both") {
+      const createdA = await postJSON("/v2/bot/richmenu", buildPayload("advisor"));
+      const advId = createdA?.richMenuId; if (!advId) throw new Error("no richMenuId (advisor)");
+      if (step === "create") { res.status(200).json({ ok: true, step, advId, debug }); return; }
+      await uploadImage(advId, imgAdvisor, "image/png");
+      if (step === "upload") { res.status(200).json({ ok: true, step, advId, debug }); return; }
+      await upsertAlias("advisor_on", advId);
+      results.advId = advId;
+    }
+
+    // 既定適用（任意）
+    const apply = req.query.apply === "1" || step === "apply" || step === "all";
+    if (apply && results.defId) await setDefaultForAll(results.defId);
+
+    res.status(200).json({ ok: true, step, menu, applied: apply, ...results, debug });
   } catch (e) {
-    debug.push({ error: String(e?.message || e) });
-    res.status(500).json({ ok: false, debug });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
