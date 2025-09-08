@@ -180,28 +180,29 @@ export async function POST(request) {
 
     // --- 5) AIモード中のみ応答 ---
     try {
-      // 追加: セッション/短文判定
+      // セッション/短文判定（追加済み）
       const sess = userId ? (sessStore.get(userId) || { last_topic: "", pending_q: "" }) : { last_topic: "", pending_q: "" };
       const isShort = q.length <= 8 || q.split(/\s+/).length <= 2;
 
       const def = selectPrompt(q, { abBucket: PROMPT_AB_BUCKET });
       const system = clamp(buildSystemPrompt(def, { text: q, strict: PROMPT_STRICT }));
 
-      // 変更: 長文連結ではなく contents で渡し、短文は「直前の問いへの回答」と解釈させる
       const runtimeHint =
         `直前の主題:${sess.last_topic || "未設定"} / 直前のこちらの問い:${sess.pending_q || "なし"} / ユーザー返答:${q} / 指示:` +
         (isShort ? "この返答は直前の問いへの短い回答として文脈をつないで解釈する。" : "通常どおり文脈を維持して解釈する。") +
         "主題から逸れない。必要時のみ一問だけ確認。完結と判断したら丁寧に締めてよい。";
 
-      // 元の buildAdvisorPrompt は残しつつ、呼び出しは contents に変更
-      // const prompt = buildAdvisorPrompt(q, system);
+      // ✅ system は systemInstruction で渡し、contents は user/model のみ
       const contents = [
-        { role: "system", parts: [{ text: system }] },
         { role: "user", parts: [{ text: runtimeHint }] },
         { role: "user", parts: [{ text: q }] },
       ];
 
-      const r = await withRetry(() => model.generateContent({ contents }));
+      const r = await withRetry(() => model.generateContent({
+        contents,
+        systemInstruction: { role: "system", parts: [{ text: system }] },
+      }));
+
       const resp = r?.response;
       const cand = resp?.candidates?.[0];
 
@@ -216,7 +217,7 @@ export async function POST(request) {
 
       if (userId) await push(userId, text);
 
-      // 追加: pending_q と last_topic を更新（短文でも文脈を保持）
+      // pending_q / last_topic 更新（追加済み）
       const lastQ = text.split(/。|\n/).map(s => s.trim()).filter(s => /[?？]$/.test(s)).pop();
       sess.pending_q = lastQ || "";
       if (!isShort) sess.last_topic = q;
