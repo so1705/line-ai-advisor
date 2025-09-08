@@ -170,8 +170,7 @@ export async function POST(request) {
       const prompt = buildAdvisorPrompt(q, system);
       const r = await model.generateContent(prompt);
       const text = r?.response?.text?.() ?? "すみません、もう一度お試しください。";
-      const decorated = PROMPT_DEBUG ? `[mode:${def.id}] ${text}` : text;
-      if (userId) await push(userId, decorated);
+      if (userId) await push(userId, text);
     } catch (e) {
       console.error("AI error", e);
       if (userId) await push(userId, "すみません、内部エラーが発生しました。時間をおいて再度お試しください。");
