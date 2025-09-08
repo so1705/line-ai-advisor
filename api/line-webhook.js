@@ -29,6 +29,21 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+// ==== 追加: 簡易セッション/ユーティリティ（最小限） ====
+const sessStore = globalThis.__flagsSess ??= new Map(); // key: userId -> { last_topic, pending_q }
+const clamp = (s, n = 2500) => (typeof s === "string" && s.length > n ? s.slice(0, n) : s);
+async function withRetry(fn, times = 2, delay = 400) {
+  try { return await fn(); }
+  catch (e) {
+    const st = e?.status ?? e?.cause?.status;
+    if (times > 0 && (st === 429 || (st >= 500 && st < 600))) {
+      await new Promise(r => setTimeout(r, delay));
+      return withRetry(fn, times - 1, delay * 2);
+    }
+    throw e;
+  }
+}
+
 // ==== util ====
 function verify(request, raw) {
   try {
@@ -165,15 +180,58 @@ export async function POST(request) {
 
     // --- 5) AIモード中のみ応答 ---
     try {
+      // 追加: セッション/短文判定
+      const sess = userId ? (sessStore.get(userId) || { last_topic: "", pending_q: "" }) : { last_topic: "", pending_q: "" };
+      const isShort = q.length <= 8 || q.split(/\s+/).length <= 2;
+
       const def = selectPrompt(q, { abBucket: PROMPT_AB_BUCKET });
-      const system = buildSystemPrompt(def, { text: q, strict: PROMPT_STRICT });
-      const prompt = buildAdvisorPrompt(q, system);
-      const r = await model.generateContent(prompt);
-      const text = r?.response?.text?.() ?? "すみません、もう一度お試しください。";
+      const system = clamp(buildSystemPrompt(def, { text: q, strict: PROMPT_STRICT }));
+
+      // 変更: 長文連結ではなく contents で渡し、短文は「直前の問いへの回答」と解釈させる
+      const runtimeHint =
+        `直前の主題:${sess.last_topic || "未設定"} / 直前のこちらの問い:${sess.pending_q || "なし"} / ユーザー返答:${q} / 指示:` +
+        (isShort ? "この返答は直前の問いへの短い回答として文脈をつないで解釈する。" : "通常どおり文脈を維持して解釈する。") +
+        "主題から逸れない。必要時のみ一問だけ確認。完結と判断したら丁寧に締めてよい。";
+
+      // 元の buildAdvisorPrompt は残しつつ、呼び出しは contents に変更
+      // const prompt = buildAdvisorPrompt(q, system);
+      const contents = [
+        { role: "system", parts: [{ text: system }] },
+        { role: "user", parts: [{ text: runtimeHint }] },
+        { role: "user", parts: [{ text: q }] },
+      ];
+
+      const r = await withRetry(() => model.generateContent({ contents }));
+      const resp = r?.response;
+      const cand = resp?.candidates?.[0];
+
+      let text;
+      if (!cand) {
+        text = "うまく受け取れませんでした。要点を一言で教えてもらえますか？";
+      } else if (cand.finishReason === "SAFETY") {
+        text = "内容の一部が安全フィルタにかかったようです。言い換えてもう一度お願いします。";
+      } else {
+        text = resp.text();
+      }
+
       if (userId) await push(userId, text);
+
+      // 追加: pending_q と last_topic を更新（短文でも文脈を保持）
+      const lastQ = text.split(/。|\n/).map(s => s.trim()).filter(s => /[?？]$/.test(s)).pop();
+      sess.pending_q = lastQ || "";
+      if (!isShort) sess.last_topic = q;
+      if (userId) sessStore.set(userId, sess);
+
+      if (PROMPT_DEBUG) {
+        console.log("gemini.meta", { finishReason: cand?.finishReason, hasCandidates: !!cand });
+      }
     } catch (e) {
-      console.error("AI error", e);
-      if (userId) await push(userId, "すみません、内部エラーが発生しました。時間をおいて再度お試しください。");
+      console.error("AI error", { name: e?.name, status: e?.status, message: e?.message });
+      if (userId) {
+        const sess = sessStore.get(userId) || {};
+        const hint = sess?.pending_q ? `（直前の問い:「${sess.pending_q}」へのご回答ですか？）` : "";
+        await push(userId, `すみません、こちらでうまく処理できませんでした。${hint}一言で補足いただけると助かります。`);
+      }
     }
   }
 
