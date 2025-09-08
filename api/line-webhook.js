@@ -29,8 +29,8 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
-// ==== 追加: 簡易セッション/ユーティリティ（最小限） ====
-const sessStore = globalThis.__flagsSess ??= new Map(); // key: userId -> { last_topic, pending_q }
+// ==== 追加: セッション（文脈/履歴）・ユーティリティ ====
+const sessStore = globalThis.__flagsSess ??= new Map(); // userId -> { last_topic, pending_q, history: [{role,text}] }
 const clamp = (s, n = 2500) => (typeof s === "string" && s.length > n ? s.slice(0, n) : s);
 async function withRetry(fn, times = 2, delay = 400) {
   try { return await fn(); }
@@ -42,6 +42,30 @@ async function withRetry(fn, times = 2, delay = 400) {
     }
     throw e;
   }
+}
+function getSess(userId) {
+  const s = sessStore.get(userId) || { last_topic: "", pending_q: "", history: [] };
+  if (!Array.isArray(s.history)) s.history = [];
+  return s;
+}
+function pushHist(sess, role, text) {
+  sess.history.push({ role, text: clamp(text, 800) });
+  // 直近6発言だけ保持（user/model 合算で6）
+  if (sess.history.length > 6) sess.history = sess.history.slice(-6);
+}
+function normalizeShortInput(q, sess) {
+  const isShort = q.length <= 8 || q.split(/\s+/).length <= 2;
+  if (!isShort) return q;
+  const lastAssistant = [...sess.history].reverse().find(h => h.role === "model")?.text || "";
+  const pending = sess.pending_q || "";
+  const topic = sess.last_topic || "";
+  // 短文を“直前質問への回答キーワード”として明示した拡張入力にする
+  return [
+    `【短文回答の解釈】以下のユーザー入力「${q}」は、直前のあなたの問い「${pending || "（直前の問い不明）"}」`,
+    `および直近のあなたの発話「${lastAssistant || "（直近発話なし）"}」に対する短い回答/キーワードです。`,
+    `会話の主題は「${topic || "（主題未設定）"}」。これらの文脈を踏まえて解釈し、主題から逸れずに応答してください。`,
+    `【ユーザーの短文入力】${q}`
+  ].join("\n");
 }
 
 // ==== util ====
@@ -141,13 +165,13 @@ export async function POST(request) {
     // --- 2) テキスト以外は無視 ---
     if (ev.type !== "message" || ev.message?.type !== "text") continue;
 
-    const q = (ev.message?.text ?? "").trim();
+    const qRaw = (ev.message?.text ?? "").trim();
 
     // --- 3) （保険）手打ちでも切替できるように ---
     const onWords = ["AIアドバイザー"];
     const offWords = ["終了", "やめる", "メニュー"];
 
-    if (userId && onWords.includes(q)) {
+    if (userId && onWords.includes(qRaw)) {
       try {
         const id = await resolveIdFromAlias("advisor_on");
         await linkById(userId, id);
@@ -159,7 +183,7 @@ export async function POST(request) {
       continue;
     }
 
-    if (userId && offWords.includes(q)) {
+    if (userId && offWords.includes(qRaw)) {
       try {
         const id = await resolveIdFromAlias("default");
         await linkById(userId, id);
@@ -180,20 +204,24 @@ export async function POST(request) {
 
     // --- 5) AIモード中のみ応答 ---
     try {
-      // セッション/短文判定（追加済み）
-      const sess = userId ? (sessStore.get(userId) || { last_topic: "", pending_q: "" }) : { last_topic: "", pending_q: "" };
-      const isShort = q.length <= 8 || q.split(/\s+/).length <= 2;
+      const sess = userId ? getSess(userId) : { last_topic: "", pending_q: "", history: [] };
+      const q = normalizeShortInput(qRaw, sess);
 
-      const def = selectPrompt(q, { abBucket: PROMPT_AB_BUCKET });
-      const system = clamp(buildSystemPrompt(def, { text: q, strict: PROMPT_STRICT }));
+      const def = selectPrompt(qRaw, { abBucket: PROMPT_AB_BUCKET });
+      const system = clamp(buildSystemPrompt(def, { text: qRaw, strict: PROMPT_STRICT }));
 
+      // 会話履歴を contents に詰める（直近6発言）
+      const histParts = sess.history.flatMap(h => {
+        return [{ role: h.role === "model" ? "model" : "user", parts: [{ text: h.text }] }];
+      });
+
+      // ランタイムヒント（進路逸脱を防ぐ）
       const runtimeHint =
-        `直前の主題:${sess.last_topic || "未設定"} / 直前のこちらの問い:${sess.pending_q || "なし"} / ユーザー返答:${q} / 指示:` +
-        (isShort ? "この返答は直前の問いへの短い回答として文脈をつないで解釈する。" : "通常どおり文脈を維持して解釈する。") +
-        "主題から逸れない。必要時のみ一問だけ確認。完結と判断したら丁寧に締めてよい。";
+        `直前の主題:${sess.last_topic || "未設定"} / 直前のこちらの問い:${sess.pending_q || "なし"} / 入力種別:${q === qRaw ? "通常" : "短文拡張"}` +
+        "。主題から逸れず、必要時のみ一問だけ確認。完結と判断したら丁寧に締めてもよい。";
 
-      // ✅ system は systemInstruction で渡し、contents は user/model のみ
       const contents = [
+        ...histParts,
         { role: "user", parts: [{ text: runtimeHint }] },
         { role: "user", parts: [{ text: q }] },
       ];
@@ -217,10 +245,17 @@ export async function POST(request) {
 
       if (userId) await push(userId, text);
 
-      // pending_q / last_topic 更新（追加済み）
+      // セッション更新：pending_q, last_topic, history
       const lastQ = text.split(/。|\n/).map(s => s.trim()).filter(s => /[?？]$/.test(s)).pop();
-      sess.pending_q = lastQ || "";
-      if (!isShort) sess.last_topic = q;
+      sess.pending_q = lastQ || sess.pending_q;
+      // 直近の主題は、通常入力のときだけ上書き
+      const isShortLike = q !== qRaw;
+      if (!isShortLike) sess.last_topic = qRaw;
+
+      // 履歴：今回の user 入力と model 出力を積む
+      pushHist(sess, "user", qRaw);
+      pushHist(sess, "model", text);
+
       if (userId) sessStore.set(userId, sess);
 
       if (PROMPT_DEBUG) {
@@ -229,7 +264,7 @@ export async function POST(request) {
     } catch (e) {
       console.error("AI error", { name: e?.name, status: e?.status, message: e?.message });
       if (userId) {
-        const sess = sessStore.get(userId) || {};
+        const sess = getSess(userId);
         const hint = sess?.pending_q ? `（直前の問い:「${sess.pending_q}」へのご回答ですか？）` : "";
         await push(userId, `すみません、こちらでうまく処理できませんでした。${hint}一言で補足いただけると助かります。`);
       }
